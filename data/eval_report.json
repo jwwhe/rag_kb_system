@@ -1,0 +1,17 @@
+{
+  "rag": {
+    "samples": 10,
+    "retrieval": {
+      "recall@1": 0.45,
+      "precision@1": 0.8,
+      "ndcg@1": 0.8,
+      "recall@3": 0.9,
+      "precision@3": 0.5333333333333333,
+      "ndcg@3": 0.85,
+      "recall@5": 0.9,
+      "precision@5": 0.32,
+      "ndcg@5": 0.85,
+      "mrr": 0.85
+    }
+  }
+}

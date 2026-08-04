@@ -1,0 +1,123 @@
+[
+  {
+    "question": "Transformer 模型使用了多少层编码器和解码器？",
+    "relevant_doc_ids": [
+      "chunk_000000"
+    ],
+    "expected_keywords": [
+      "6",
+      "编码器",
+      "解码器"
+    ],
+    "match_count": 1
+  },
+  {
+    "question": "缩放点积注意力公式中为什么要除以 sqrt(d_k)？",
+    "relevant_doc_ids": [
+      "chunk_000000",
+      "chunk_000001"
+    ],
+    "expected_keywords": [
+      "梯度",
+      "饱和",
+      "softmax"
+    ],
+    "match_count": 2
+  },
+  {
+    "question": "Transformer 在 WMT 2014 英德翻译上取得了多少 BLEU 分数？",
+    "relevant_doc_ids": [
+      "chunk_000000",
+      "chunk_000001"
+    ],
+    "expected_keywords": [
+      "28.4",
+      "BLEU"
+    ],
+    "match_count": 2
+  },
+  {
+    "question": "多头注意力机制使用了多少个头？",
+    "relevant_doc_ids": [
+      "chunk_000000",
+      "chunk_000001"
+    ],
+    "expected_keywords": [
+      "8",
+      "多头"
+    ],
+    "match_count": 2
+  },
+  {
+    "question": "复现实验中学习率 warmup_steps 设置为多少？",
+    "relevant_doc_ids": [
+      "chunk_000000",
+      "chunk_000001"
+    ],
+    "expected_keywords": [
+      "4000",
+      "warmup"
+    ],
+    "match_count": 2
+  },
+  {
+    "question": "位置编码使用什么函数生成？",
+    "relevant_doc_ids": [
+      "chunk_000000",
+      "chunk_000001"
+    ],
+    "expected_keywords": [
+      "正弦",
+      "余弦",
+      "sin",
+      "cos"
+    ],
+    "match_count": 2
+  },
+  {
+    "question": "复现实验中漏掉 sqrt(d_k) 会导致什么问题？",
+    "relevant_doc_ids": [
+      "chunk_000000",
+      "chunk_000001"
+    ],
+    "expected_keywords": [
+      "收敛",
+      "BLEU"
+    ],
+    "match_count": 2
+  },
+  {
+    "question": "Transformer 的训练成本相比之前模型降低了多少？",
+    "relevant_doc_ids": [],
+    "expected_keywords": [
+      "1/4",
+      "四分之一",
+      "成本"
+    ],
+    "match_count": 0
+  },
+  {
+    "question": "位置编码的维度必须与什么一致？",
+    "relevant_doc_ids": [
+      "chunk_000000",
+      "chunk_000001"
+    ],
+    "expected_keywords": [
+      "d_model",
+      "512"
+    ],
+    "match_count": 2
+  },
+  {
+    "question": "RNN 的核心问题是什么？",
+    "relevant_doc_ids": [
+      "chunk_000001"
+    ],
+    "expected_keywords": [
+      "并行",
+      "梯度",
+      "依赖"
+    ],
+    "match_count": 1
+  }
+]
