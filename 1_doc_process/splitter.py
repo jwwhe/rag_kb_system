@@ -148,7 +148,7 @@ class TextSplitter:
                     continue
                 chunk_meta = dict(base_meta)
                 chunk_meta.update({
-                    "chunk_id": f"chunk_{len(all_chunks):06d}",
+                    "chunk_id": f"{base_meta.get('file_name', 'doc')}_{uuid.uuid4().hex[:8]}",
                     "chunk_index": len(all_chunks),
                     "upload_time": upload_time,
                     "chunk_size": len(chunk_text),

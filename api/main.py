@@ -17,9 +17,7 @@ if PROJECT_ROOT not in sys.path:
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
-
+from fastapi.responses import JSONResponse
 from config.settings import get_settings_cached
 from utils.response import error_response
 from utils.exceptions import RAGSystemException
@@ -47,13 +45,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ==================== 静态文件服务（前端页面）====================
-FRONTEND_DIR = os.path.join(PROJECT_ROOT, "frontend")
-if os.path.isdir(FRONTEND_DIR):
-    app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
-    logger.info(f"静态文件服务已挂载: {FRONTEND_DIR}")
-
 
 # ==================== 全局异常处理器 ====================
 
@@ -152,15 +143,15 @@ async def health_check():
     }
 
 
-# ==================== 前端页面入口 ====================
+# ==================== 前端入口 ====================
 
 @app.get("/", tags=["页面"], include_in_schema=False)
-async def serve_frontend():
-    """提供前端主页面（员工问答 + 管理后台）"""
-    index_path = os.path.join(FRONTEND_DIR, "index.html")
-    if os.path.isfile(index_path):
-        return FileResponse(index_path)
-    return JSONResponse(
-        status_code=404,
-        content={"message": "前端页面未找到，请访问 /docs 查看 API 文档"},
-    )
+async def root():
+    """API 根路径 — 前端请使用 Streamlit (端口 8501)"""
+    return JSONResponse(content={
+        "message": "RAG 知识库问答系统 API",
+        "version": settings.api.version,
+        "docs": "/docs",
+        "frontend": f"http://localhost:8501",
+        "health": "/health",
+    })

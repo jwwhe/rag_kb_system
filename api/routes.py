@@ -141,6 +141,10 @@ async def upload_documents(
             # 文本分块
             chunks = splitter.split_documents(documents)
 
+            # 修正元数据：用原始文件名覆盖 loader 的临时文件名
+            for chunk in chunks:
+                chunk.metadata["file_name"] = file.filename
+
             # 向量化
             chunks = embedder.embed_documents(chunks)
 
