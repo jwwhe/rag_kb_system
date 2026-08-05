@@ -47,10 +47,9 @@ class PGVectorStore(BaseVectorStore):
 
         try:
             import psycopg
-            from pgvector.psycopg import register_vector
         except ImportError as e:
             raise VectorStoreError(
-                "缺少依赖 psycopg / pgvector，请执行: pip install psycopg[binary] pgvector"
+                "缺少依赖 psycopg，请执行: pip install psycopg[binary]"
             ) from e
 
         # 构建连接字符串
@@ -63,13 +62,10 @@ class PGVectorStore(BaseVectorStore):
         try:
             # psycopg v3，autocommit=True 避免事务包装 DDL
             self._conn = psycopg.connect(dsn, autocommit=True)
-            # 注册 pgvector 类型，使 psycopg 能自动序列化 list -> vector
-            register_vector(self._conn)
 
-            # 验证连接 + 扩展
+            # 验证连接
             with self._conn.cursor() as cur:
                 cur.execute("SELECT 1")
-                cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
             # 确保表和索引存在
             self._ensure_schema()
@@ -225,13 +221,13 @@ class PGVectorStore(BaseVectorStore):
 
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-        # <=> 余弦距离算子；ORDER BY ... ASC 距离越小越相似
+        # <=> 余弦距离算子（纯 SQL 实现）；ORDER BY ... ASC 距离越小越相似
         sql = f"""
             SELECT chunk_id, content, file_name, page, doc_id,
                    source_type, knowledge_base, meta_json,
-                   1 - (embedding <=> %s::vector) AS similarity
+                   1 - (embedding <=> %s::real[]) AS similarity
             FROM {table}{where_sql}
-            ORDER BY embedding <=> %s::vector
+            ORDER BY embedding <=> %s::real[]
             LIMIT %s
         """
         # 参数顺序：query（算 similarity）, query（ORDER BY）, where 参数, top_k
@@ -327,16 +323,15 @@ class PGVectorStore(BaseVectorStore):
     # ==================== 私有方法 ====================
 
     def _ensure_schema(self):
-        """确保表和索引存在。"""
+        """确保表和索引存在（纯 SQL 实现，无需 pgvector 扩展 DLL）。"""
         table = self.config.pg_table_name
-        dim = self.config.pg_vector_size
 
-        # 建表（chunk_id 主键，embedding vector(1024)）
+        # 建表：使用 real[] 数组存储向量（bge-m3=1024维）
         create_table_sql = f"""
             CREATE TABLE IF NOT EXISTS {table} (
                 chunk_id        TEXT PRIMARY KEY,
                 content         TEXT NOT NULL,
-                embedding       vector({dim}) NOT NULL,
+                embedding       real[] NOT NULL,
                 file_name       TEXT NOT NULL DEFAULT 'unknown',
                 page            INT NOT NULL DEFAULT 0,
                 doc_id          TEXT NOT NULL DEFAULT '',
@@ -350,18 +345,12 @@ class PGVectorStore(BaseVectorStore):
         idx_file = f"CREATE INDEX IF NOT EXISTS idx_{table}_file_name ON {table}(file_name)"
         idx_source = f"CREATE INDEX IF NOT EXISTS idx_{table}_source_type ON {table}(source_type)"
         idx_kb = f"CREATE INDEX IF NOT EXISTS idx_{table}_knowledge_base ON {table}(knowledge_base)"
-        # HNSW 向量索引（余弦距离）
-        idx_vec = (
-            f"CREATE INDEX IF NOT EXISTS idx_{table}_embedding_hnsw "
-            f"ON {table} USING hnsw (embedding vector_cosine_ops)"
-        )
 
         with self._conn.cursor() as cur:
             cur.execute(create_table_sql)
             cur.execute(idx_file)
             cur.execute(idx_source)
             cur.execute(idx_kb)
-            cur.execute(idx_vec)
 
     def _rows_to_documents(
         self, rows: List[tuple], with_similarity: bool = True

@@ -90,7 +90,7 @@ rag_kb_system/
 ### 3.1 环境要求
 
 - Python 3.10+
-- PostgreSQL 16 + pgvector 扩展（或使用 Docker 一键启动）
+- PostgreSQL 16（已安装到 `D:\PostgreSQL\16\`，纯 SQL pgvector 兼容层）
 
 ### 3.2 安装依赖
 
@@ -98,24 +98,26 @@ rag_kb_system/
 pip install -r requirements.txt
 ```
 
-### 3.3 配置 LLM API Key
+### 3.3 配置文件
 
 ```bash
-# Windows PowerShell
-$env:DEEPSEEK_API_KEY="your-deepseek-api-key"
-$env:QWEN_API_KEY="your-qwen-api-key"
-
-# Linux / macOS
-export DEEPSEEK_API_KEY="your-deepseek-api-key"
+# 复制环境变量模板并填写
+cp .env.example .env
+# 编辑 .env，填入 DEEPSEEK_API_KEY 等实际值
 ```
 
 ### 3.4 启动服务
 
 ```bash
-# 后端 API
+# 1. 确保 PostgreSQL 在运行（D 盘）
+D:\PostgreSQL\16\bin\pg_ctl -D D:\PostgreSQL\data status
+# 若未运行则启动：
+D:\PostgreSQL\16\bin\pg_ctl -D D:\PostgreSQL\data start
+
+# 2. 后端 API
 python run.py
 
-# Streamlit 前端（另开终端）
+# 3. Streamlit 前端（另开终端）
 streamlit run app_streamlit.py
 ```
 
@@ -125,9 +127,19 @@ streamlit run app_streamlit.py
 | `http://localhost:8000/docs` | Swagger API 文档 |
 | `http://localhost:8000/health` | 健康检查 |
 
-### 3.5 Docker 一键部署
+### 3.5 模型离线模式
+
+模型（bge-m3 ~2GB / bge-reranker ~1GB）已缓存到本地。若网络不通，在 `.env` 中启用离线：
 
 ```bash
+HF_HUB_OFFLINE=1
+TRANSFORMERS_OFFLINE=1
+```
+
+### 3.6 Docker 部署（可选）
+
+```bash
+# 需要 Docker Hub 可达
 docker-compose -f docker/docker-compose.yml up -d
 # 启动：FastAPI(8000) + Streamlit(8501) + PGvector(5432) + Ollama(11434)
 ```
@@ -207,9 +219,12 @@ DELETE /api/v1/kb/clear
 | 环境变量 | 说明 | 默认值 |
 |----------|------|--------|
 | `ENV` | 运行环境 | development |
+| `STORE_TYPE` | 向量库类型 (pgvector / chroma) | pgvector |
+| `PG_HOST` / `PG_PORT` / `PG_DATABASE` / `PG_USER` / `PG_PASSWORD` | PGvector 连接 | localhost/5432/rag_kb/rag/rag123 |
 | `DEEPSEEK_API_KEY` / `QWEN_API_KEY` | LLM API Key | - |
 | `OLLAMA_HOST` | Ollama 服务地址 | http://localhost:11434 |
-| `PG_HOST` / `PG_PORT` / `PG_DATABASE` / `PG_USER` / `PG_PASSWORD` | PGvector 连接 | localhost/5432/rag_kb/rag/rag123 |
+| `HF_ENDPOINT` | HuggingFace 镜像 | https://hf-mirror.com |
+| `HF_HUB_OFFLINE` | 离线模式 (1=启用) | 0 |
 
 ### 关键参数
 
@@ -272,7 +287,7 @@ BGE-Reranker 精排 (Top3)                        ← 两阶段第二阶段
 | 文本分割 | 零宽断言 `(?<=。)` + keep_separator=False |
 | 嵌入模型 | BAAI/bge-m3 |
 | 开发向量库 | Chroma |
-| 生产向量库 | **PGvector**（PostgreSQL + pgvector 扩展） |
+| 生产向量库 | **PGvector**（PostgreSQL + 纯 SQL 兼容层，无需扩展 DLL） |
 | 关键词检索 | BM25 + jieba 分词 |
 | 多样性去重 | MMR (Maximal Marginal Relevance) |
 | 重排模型 | BAAI/bge-reranker-v2-m3 |
