@@ -47,14 +47,17 @@ st.set_page_config(
 # ==================== 会话状态初始化 ====================
 def init_session_state():
     """初始化 Streamlit 会话状态。"""
-    if "session_id" not in st.session_state:
-        # 多轮对话 session_id（用于后端 RunnableWithMessageHistory）
-        st.session_state.session_id = str(uuid.uuid4())
-    if "history" not in st.session_state:
-        # 对话历史：[{"role":"user/assistant", "content":"", "citations":[], "source_type":""}]
-        st.session_state.history = []
-    if "api_base" not in st.session_state:
-        st.session_state.api_base = _API_BASE
+    defaults = {
+        "session_id": str(uuid.uuid4()),       # 多轮对话 session_id
+        "history": [],                          # 对话历史
+        "api_base": _API_BASE,                  # 后端 API 地址
+        "uploader_key": 0,                      # 上传组件 key（递增以清空）
+        "kb_stats": None,                       # 知识库统计缓存
+        "last_action": None,                    # 上一次操作描述
+    }
+    for key, val in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = val
 
 
 init_session_state()
@@ -102,7 +105,7 @@ def call_stats():
 def call_delete_file(file_name: str):
     url = f"{st.session_state.api_base}/kb/files"
     try:
-        resp = requests.request("DELETE", url, json={"file_name": file_name}, timeout=30)
+        resp = requests.delete(url, json={"file_name": file_name}, timeout=30)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as e:
@@ -113,12 +116,21 @@ def call_delete_file(file_name: str):
 def call_clear_kb():
     url = f"{st.session_state.api_base}/kb/clear"
     try:
-        resp = requests.request("DELETE", url, timeout=30)
+        resp = requests.delete(url, timeout=30)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as e:
         st.error(f"清空失败: {e}")
         return None
+
+
+def refresh_kb_stats():
+    """拉取知识库统计并缓存到 session_state。"""
+    stats = call_stats()
+    if stats and stats.get("code") == 200:
+        st.session_state.kb_stats = stats.get("data", {})
+    else:
+        st.session_state.kb_stats = None
 
 
 # ==================== 侧边栏：知识库管理 ====================
@@ -136,12 +148,13 @@ with st.sidebar:
 
     st.divider()
 
-    # 文档上传
+    # ---- 文档上传 ----
     st.subheader("📤 上传文档")
     uploaded_files = st.file_uploader(
         "选择文件（支持 PDF / Word / Markdown）",
         type=SUPPORTED_TYPES,
         accept_multiple_files=True,
+        key=f"uploader_{st.session_state.uploader_key}",
     )
     source_type = st.selectbox("来源类型", SOURCE_TYPES, help="用于多源知识融合")
     knowledge_base = st.text_input("知识库标识", value="default")
@@ -159,43 +172,68 @@ with st.sidebar:
                         f"📄 {item['file_name']} | "
                         f"{item['pages']} 段 → {item['chunks']} 块"
                     )
+                # 上传成功后：清空文件选择器 + 自动刷新统计
+                st.session_state.uploader_key += 1
+                refresh_kb_stats()
+                st.rerun()
             elif result:
                 st.error(result.get("message", "上传失败"))
 
     st.divider()
 
-    # 知识库统计
+    # ---- 知识库统计（持久化显示，不会因交互消失）----
     st.subheader("📊 知识库统计")
-    if st.button("刷新统计", use_container_width=True):
-        stats = call_stats()
-        if stats and stats.get("code") == 200:
-            data = stats.get("data", {})
-            st.metric("向量库类型", data.get("store_type", "-"))
-            st.metric("总块数", data.get("total_chunks", 0))
-            st.metric("文件数", data.get("total_files", 0))
-            file_names = data.get("file_names", [])
-            if file_names:
-                st.write("**文件列表：**")
-                for fn in file_names:
-                    col1, col2 = st.columns([4, 1])
-                    with col1:
-                        st.write(f"📄 {fn}")
-                    with col2:
-                        if st.button("删除", key=f"del_{fn}"):
-                            if call_delete_file(fn):
-                                st.success(f"已删除 {fn}")
-                                st.rerun()
+
+    # 首次加载自动拉取
+    if st.session_state.kb_stats is None:
+        refresh_kb_stats()
+
+    col_refresh, _ = st.columns([1, 2])
+    with col_refresh:
+        if st.button("🔄 刷新", use_container_width=True):
+            refresh_kb_stats()
+
+    stats_data = st.session_state.kb_stats
+    if stats_data:
+        st.metric("向量库类型", stats_data.get("store_type", "-"))
+        st.metric("总块数", stats_data.get("total_chunks", 0))
+        st.metric("文件数", stats_data.get("total_files", 0))
+
+        file_names = stats_data.get("file_names", [])
+        if file_names:
+            st.write("**文件列表：**")
+            for fn in file_names:
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.write(f"📄 {fn}")
+                with col2:
+                    if st.button("🗑️", key=f"del_{fn}", help=f"删除 {fn}"):
+                        result = call_delete_file(fn)
+                        if result and result.get("code") == 200:
+                            st.success(f"已删除 {fn}")
+                            refresh_kb_stats()
+                            st.rerun()
+                        else:
+                            st.error(f"删除失败: {result}")
+        else:
+            st.caption("（知识库为空）")
+    else:
+        st.caption("（无法连接后端）")
 
     st.divider()
 
-    # 清空知识库
+    # ---- 清空知识库 ----
     st.subheader("⚠️ 危险操作")
     if st.button("清空知识库", type="secondary", use_container_width=True):
         if st.session_state.get("confirm_clear"):
-            if call_clear_kb():
+            result = call_clear_kb()
+            if result and result.get("code") == 200:
                 st.success("知识库已清空")
                 st.session_state.confirm_clear = False
+                refresh_kb_stats()
                 st.rerun()
+            else:
+                st.error("清空失败")
         else:
             st.session_state.confirm_clear = True
             st.warning("再次点击确认清空（不可恢复）")
@@ -203,7 +241,7 @@ with st.sidebar:
 
     st.divider()
 
-    # 重置对话
+    # ---- 重置对话 ----
     if st.button("🔄 新建对话", use_container_width=True):
         st.session_state.session_id = str(uuid.uuid4())
         st.session_state.history = []
