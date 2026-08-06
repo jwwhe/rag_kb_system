@@ -1,12 +1,12 @@
 # ============================================================================
 #  RAG 知识库问答系统 - Docker Compose 编排
-#  启动方式: docker-compose -f docker/docker-compose.yml up -d
-#  生产环境使用 PGvector + Streamlit 前端 + FastAPI 后端
+#  启动：docker compose -f docker/docker-compose.yml up -d
+#  服务：FastAPI(8000) + Streamlit(8501) + PGvector(5432)
+#  LLM 使用 DeepSeek API（无需 Ollama）
 # ============================================================================
-version: "3.8"
 
 services:
-  # ==================== FastAPI 后端服务 ====================
+  # ==================== FastAPI 后端 ====================
   rag-api:
     build:
       context: ..
@@ -16,28 +16,25 @@ services:
       - "8000:8000"
     environment:
       - ENV=production
+      - STORE_TYPE=pgvector
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - QWEN_API_KEY=${QWEN_API_KEY:-}
-      - OLLAMA_HOST=http://ollama:11434
-      # PGvector 连接配置
       - PG_HOST=pgvector
       - PG_PORT=5432
       - PG_DATABASE=rag_kb
       - PG_USER=rag
       - PG_PASSWORD=rag123
+      - HF_ENDPOINT=https://hf-mirror.com
     volumes:
-      # Chroma 数据持久化（仅开发环境 fallback 用）
-      - chroma_data:/app/data/chroma_db
+      - hf_cache:/root/.cache/huggingface   # 模型缓存持久化
     depends_on:
       pgvector:
         condition: service_healthy
-      ollama:
-        condition: service_started
     restart: unless-stopped
     networks:
       - rag-network
 
-  # ==================== Streamlit 前端服务 ====================
+  # ==================== Streamlit 前端 ====================
   rag-streamlit:
     build:
       context: ..
@@ -47,19 +44,19 @@ services:
       - "8501:8501"
     command: streamlit run app_streamlit.py --server.port=8501 --server.address=0.0.0.0
     environment:
-      - API_BASE_URL=http://rag-api:8000
+      - RAG_API_BASE=http://rag-api:8000/api/v1
     depends_on:
       - rag-api
     restart: unless-stopped
     networks:
       - rag-network
 
-  # ==================== PostgreSQL + pgvector 向量数据库（生产环境）====================
+  # ==================== PGvector 向量数据库 ====================
   pgvector:
     image: pgvector/pgvector:pg16
     container_name: rag-pgvector
     ports:
-      - "5432:5432"
+      - "5433:5432"
     environment:
       - POSTGRES_DB=rag_kb
       - POSTGRES_USER=rag
@@ -75,34 +72,10 @@ services:
     networks:
       - rag-network
 
-  # ==================== Ollama 本地模型服务（可选）====================
-  ollama:
-    image: ollama/ollama:latest
-    container_name: rag-ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    environment:
-      - OLLAMA_KEEP_ALIVE=24h
-    restart: unless-stopped
-    networks:
-      - rag-network
-    # 如需 GPU 支持，取消注释以下配置：
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
-
 volumes:
-  chroma_data:
-    driver: local
   pgvector_data:
     driver: local
-  ollama_data:
+  hf_cache:
     driver: local
 
 networks:

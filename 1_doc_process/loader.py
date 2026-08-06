@@ -173,18 +173,11 @@ class DocumentLoader:
             return Docx2txtLoader(file_path)
 
         elif ext in (".md", ".markdown"):
-            # 优先用 UnstructuredMarkdownLoader（需 unstructured 包）
-            # 未安装则 fallback 到 TextLoader（纯文本读取，零依赖）
-            try:
-                from langchain_community.document_loaders import UnstructuredMarkdownLoader
-                return UnstructuredMarkdownLoader(file_path)
-            except (ImportError, ModuleNotFoundError):
-                from langchain_community.document_loaders import TextLoader
-                logger.warning(
-                    "unstructured 包未安装，Markdown 将按纯文本加载。"
-                    "如需结构化解析请执行: pip install unstructured"
-                )
-                return TextLoader(file_path, encoding="utf-8")
+            # TextLoader 纯文本加载（零依赖，兼容性好）
+            # 如需结构化 MD 解析可换 UnstructuredMarkdownLoader（需 nltk punkt_tab）
+            from langchain_community.document_loaders import TextLoader
+            logger.info("Markdown 文件使用 TextLoader 加载")
+            return TextLoader(file_path, encoding="utf-8")
 
         else:
             raise DocumentProcessError(f"未实现的加载器: {ext}")

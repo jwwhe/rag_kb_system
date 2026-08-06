@@ -136,12 +136,18 @@ HF_HUB_OFFLINE=1
 TRANSFORMERS_OFFLINE=1
 ```
 
-### 3.6 Docker 部署（可选）
+### 3.6 Docker 部署（可选，仅需 FastAPI + Streamlit 镜像）
+
+PGvector 和 LLM 均使用宿主机资源，Docker 只打包应用层：
 
 ```bash
-# 需要 Docker Hub 可达
-docker-compose -f docker/docker-compose.yml up -d
-# 启动：FastAPI(8000) + Streamlit(8501) + PGvector(5432) + Ollama(11434)
+# 前置条件：宿主机 PostgreSQL 已启动（D:\PostgreSQL\16\）
+#           DEEPSEEK_API_KEY 已设置
+
+docker compose -f docker/docker-compose.yml up -d
+# 启动：FastAPI(8000) + Streamlit(8501)
+# PGvector → 自动连接宿主机 PostgreSQL（host.docker.internal:5432）
+# LLM     → 使用 DeepSeek API（无需本地 GPU / Ollama）
 ```
 
 ---

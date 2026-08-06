@@ -1,38 +1,36 @@
 # ============================================================================
 #  RAG 知识库问答系统 - Docker 镜像
-#  构建方式: docker build -t rag-kb-system:1.0 -f docker/Dockerfile .
+#  构建：docker build -t rag-kb:latest -f docker/Dockerfile .
 # ============================================================================
 FROM python:3.10-slim
 
-# 设置工作目录
+# 系统依赖
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc g++ curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# 时区
+ENV TZ=Asia/Shanghai
+
 WORKDIR /app
 
-# 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    ENV=production \
-    TZ=Asia/Shanghai
+    ENV=production
 
-# 安装系统依赖
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        gcc \
-        g++ \
-        curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# 复制依赖文件并安装
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 复制项目代码
+# 先装 CPU 版 PyTorch（体积小，避免 CUDA 大包超时）
+RUN pip install --no-cache-dir --timeout 600 --retries 5 \
+    -i https://mirrors.aliyun.com/pypi/simple \
+    torch --extra-index-url https://mirrors.aliyun.com/pytorch-wheels/cpu
+
+# 再装其他依赖（清华镜像，文件小不会超时）
+RUN pip install --no-cache-dir --timeout 300 --retries 5 \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    -r requirements.txt
+
 COPY . .
 
-# 创建数据目录
-RUN mkdir -p /app/data/chroma_db
-
-# 暴露端口
 EXPOSE 8000
-
-# 启动命令
 CMD ["python", "run.py"]
