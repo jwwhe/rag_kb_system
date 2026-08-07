@@ -10,7 +10,7 @@
   启动方式：
     streamlit run app_streamlit.py
   架构：
-    Streamlit (前端) ──HTTP──> FastAPI (后端 /api/v1/*)
+    Streamlit (前端) --HTTP--> FastAPI (后端 /api/v1/*)
 ================================================================================
 """
 import os
@@ -19,7 +19,7 @@ import uuid
 import requests
 import streamlit as st
 
-# 确保项目根目录在 sys.path（便于直接读取 config）
+# 确保项目根目录在 sys.path，便于直接读取 config
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -33,13 +33,18 @@ _API_BASE = os.getenv("RAG_API_BASE", f"http://localhost:{_SETTINGS.api.port}/ap
 # 支持的文件类型
 SUPPORTED_TYPES = ["pdf", "docx", "md", "markdown"]
 SOURCE_TYPES = ["论文原文", "综述解读", "实验笔记"]
+SUGGESTIONS = [
+    "这篇论文的核心方法是什么？",
+    "综述解读和论文原文的结论一致吗？",
+    "实验笔记里记录了什么关键参数？",
+]
 
 
 # ==================== 页面配置 ====================
 st.set_page_config(
-    page_title="RAG 知识库问答系统",
-    page_icon="📚",
-    layout="wide",
+    page_title="知识库问答",
+    page_icon=":material/menu_book:",
+    layout="centered",
     initial_sidebar_state="expanded",
 )
 
@@ -74,7 +79,7 @@ def call_upload(files, source_type: str, knowledge_base: str):
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"上传失败: {e}")
+        st.error(f"上传失败: {e}", icon=":material/error:")
         return None
 
 
@@ -87,7 +92,7 @@ def call_ask(question: str, session_id: str):
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"问答失败: {e}")
+        st.error(f"问答失败: {e}", icon=":material/error:")
         return None
 
 
@@ -109,7 +114,7 @@ def call_delete_file(file_name: str):
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"删除失败: {e}")
+        st.error(f"删除失败: {e}", icon=":material/error:")
         return None
 
 
@@ -120,7 +125,7 @@ def call_clear_kb():
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"清空失败: {e}")
+        st.error(f"清空失败: {e}", icon=":material/error:")
         return None
 
 
@@ -133,186 +138,240 @@ def refresh_kb_stats():
         st.session_state.kb_stats = None
 
 
+# ==================== 引用与问答渲染 ====================
+def render_source_stats(source_stats):
+    """展示本地与外部来源的数量。"""
+    if not source_stats:
+        return
+    parts = []
+    if source_stats.get("internal_sources"):
+        parts.append(f"本地来源 {source_stats['internal_sources']} 条")
+    if source_stats.get("external_sources"):
+        parts.append(f"外部来源 {source_stats['external_sources']} 条")
+    if parts:
+        st.caption("引用来源：" + "，".join(parts))
+
+
+def render_citations(citations, source_type="internal"):
+    """以紧凑卡片展示引用来源。"""
+    if not citations:
+        return
+    label = "外部引用" if source_type == "external" else "本地引用"
+    with st.expander(f"{label}，共 {len(citations)} 条", icon=":material/description:"):
+        for cit in citations:
+            with st.container(border=True):
+                st.markdown(f"**{cit['citation_id']}** · {cit['file_name']}")
+                page = cit.get("page", "-")
+                similarity = cit.get("similarity", 0)
+                kind = "外部" if cit.get("source_type") == "external" else "本地"
+                st.caption(f"第 {page} 页 · 相似度 {similarity:.4f} · {kind}")
+                snippet = cit.get("original_text", "")[:300]
+                if len(cit.get("original_text", "")) > 300:
+                    snippet += "..."
+                st.code(snippet)
+
+
+def ask_and_render(question: str):
+    """追加用户问题，调用后端并渲染助手回答。"""
+    st.session_state.history.append({"role": "user", "content": question})
+    with st.chat_message("user", avatar=":material/person:"):
+        st.markdown(question)
+
+    with st.chat_message("assistant", avatar=":material/menu_book:"):
+        with st.spinner("正在检索并生成回答"):
+            result = call_ask(question, st.session_state.session_id)
+        if not result:
+            st.error("问答失败，请检查后端服务是否运行", icon=":material/error:")
+            return
+        if result.get("code") != 200:
+            st.error(result.get("message", "问答失败"), icon=":material/error:")
+            return
+
+        data = result.get("data", {})
+        answer = data.get("answer", "")
+        citations = data.get("citations", [])
+        source_type = data.get("source_type", "internal")
+
+        st.markdown(answer)
+        render_source_stats(data.get("source_stats"))
+        render_citations(citations, source_type)
+
+        st.session_state.history.append({
+            "role": "assistant",
+            "content": answer,
+            "citations": citations,
+            "source_type": source_type,
+        })
+
+
+@st.dialog("清空知识库", icon=":material/delete_forever:")
+def clear_kb_dialog():
+    """清空知识库前的二次确认弹窗。"""
+    st.write("将删除全部文档与分块，此操作不可恢复。")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("确认清空", type="primary", icon=":material/check:", width="stretch"):
+            result = call_clear_kb()
+            if result and result.get("code") == 200:
+                st.session_state.kb_stats = None
+                st.toast("知识库已清空")
+                st.rerun()
+            else:
+                st.error("清空失败，请检查后端连接", icon=":material/error:")
+    with col2:
+        if st.button("取消", icon=":material/close:", width="stretch"):
+            st.rerun()
+
+
 # ==================== 侧边栏：知识库管理 ====================
 with st.sidebar:
-    st.title("📚 知识库管理")
+    st.subheader("知识库管理")
+    st.caption("维护文档、统计与后端连接")
+    st.space("small")
 
-    # API 地址配置
-    api_base_input = st.text_input(
-        "后端 API 地址",
-        value=st.session_state.api_base,
-        help="FastAPI 后端地址，默认 http://localhost:8000/api/v1",
-    )
-    if api_base_input != st.session_state.api_base:
-        st.session_state.api_base = api_base_input.rstrip("/")
+    with st.container(border=True):
+        api_base_input = st.text_input(
+            "API 地址",
+            value=st.session_state.api_base,
+            help="FastAPI 后端地址，默认 http://localhost:8000/api/v1",
+            label_visibility="collapsed",
+            icon=":material/link:",
+        )
+        if api_base_input != st.session_state.api_base:
+            st.session_state.api_base = api_base_input.rstrip("/")
 
-    st.divider()
+    st.space("small")
+    st.markdown("**上传文档**")
 
-    # ---- 文档上传 ----
-    st.subheader("📤 上传文档")
-    uploaded_files = st.file_uploader(
-        "选择文件（支持 PDF / Word / Markdown）",
-        type=SUPPORTED_TYPES,
-        accept_multiple_files=True,
-        key=f"uploader_{st.session_state.uploader_key}",
-    )
-    source_type = st.selectbox("来源类型", SOURCE_TYPES, help="用于多源知识融合")
-    knowledge_base = st.text_input("知识库标识", value="default")
+    with st.form("upload_form", border=False):
+        uploaded_files = st.file_uploader(
+            "选择文件",
+            type=SUPPORTED_TYPES,
+            accept_multiple_files=True,
+            key=f"uploader_{st.session_state.uploader_key}",
+            help="支持 PDF、Word、Markdown",
+            label_visibility="collapsed",
+        )
+        source_type = st.segmented_control(
+            "来源类型",
+            SOURCE_TYPES,
+            default=SOURCE_TYPES[0],
+            key="source_type",
+            help="用于多源知识融合",
+        )
+        knowledge_base = st.text_input(
+            "知识库标识",
+            value="default",
+            help="文档所属知识库",
+        )
+        submitted = st.form_submit_button(
+            "入库",
+            type="primary",
+            icon=":material/upload:",
+            width="stretch",
+        )
 
-    if st.button("入库", type="primary", use_container_width=True):
+    if submitted:
         if not uploaded_files:
-            st.warning("请先选择文件")
+            st.warning("请先选择文件", icon=":material/upload_file:")
         else:
-            with st.spinner("处理中..."):
+            with st.spinner("正在处理文档"):
                 result = call_upload(uploaded_files, source_type, knowledge_base)
             if result and result.get("code") == 200:
-                st.success(result.get("message", "上传成功"))
-                for item in result.get("data", []):
-                    st.write(
-                        f"📄 {item['file_name']} | "
-                        f"{item['pages']} 段 → {item['chunks']} 块"
-                    )
+                st.success(result.get("message", "上传成功"), icon=":material/check_circle:")
+                with st.container(border=True):
+                    for item in result.get("data", []):
+                        st.caption(f"{item['file_name']}：{item['pages']} 段 → {item['chunks']} 块")
                 # 上传成功后：清空文件选择器 + 自动刷新统计
                 st.session_state.uploader_key += 1
                 refresh_kb_stats()
                 st.rerun()
             elif result:
-                st.error(result.get("message", "上传失败"))
+                st.error(result.get("message", "上传失败"), icon=":material/error:")
 
-    st.divider()
-
-    # ---- 知识库统计（持久化显示，不会因交互消失）----
-    st.subheader("📊 知识库统计")
+    st.space("small")
+    st.markdown("**知识库统计**")
 
     # 首次加载自动拉取
     if st.session_state.kb_stats is None:
         refresh_kb_stats()
 
-    col_refresh, _ = st.columns([1, 2])
-    with col_refresh:
-        if st.button("🔄 刷新", use_container_width=True):
-            refresh_kb_stats()
-
     stats_data = st.session_state.kb_stats
     if stats_data:
-        st.metric("向量库类型", stats_data.get("store_type", "-"))
+        with st.container(horizontal=True, horizontal_alignment="distribute"):
+            st.badge("已连接", icon=":material/cloud_done:", color="green")
+            if st.button("刷新", icon=":material/refresh:", key="refresh_stats", width="content"):
+                refresh_kb_stats()
+        st.metric("向量库", stats_data.get("store_type", "-"))
         st.metric("总块数", stats_data.get("total_chunks", 0))
         st.metric("文件数", stats_data.get("total_files", 0))
 
         file_names = stats_data.get("file_names", [])
-        if file_names:
-            st.write("**文件列表：**")
+        with st.expander(f"文件列表 · {len(file_names)}", icon=":material/description:"):
+            if not file_names:
+                st.caption("知识库为空")
             for fn in file_names:
-                col1, col2 = st.columns([4, 1])
+                col1, col2 = st.columns([4, 1], vertical_alignment="center")
                 with col1:
-                    st.write(f"📄 {fn}")
+                    st.caption(fn)
                 with col2:
-                    if st.button("🗑️", key=f"del_{fn}", help=f"删除 {fn}"):
+                    if st.button(
+                        "删除",
+                        key=f"del_{fn}",
+                        help=f"删除 {fn}",
+                        icon=":material/delete:",
+                        width="stretch",
+                    ):
                         result = call_delete_file(fn)
                         if result and result.get("code") == 200:
-                            st.success(f"已删除 {fn}")
+                            st.toast(f"已删除 {fn}")
                             refresh_kb_stats()
                             st.rerun()
                         else:
-                            st.error(f"删除失败: {result}")
-        else:
-            st.caption("（知识库为空）")
+                            st.error("删除失败", icon=":material/error:")
     else:
-        st.caption("（无法连接后端）")
-
-    st.divider()
-
-    # ---- 清空知识库 ----
-    st.subheader("⚠️ 危险操作")
-    if st.button("清空知识库", type="secondary", use_container_width=True):
-        if st.session_state.get("confirm_clear"):
-            result = call_clear_kb()
-            if result and result.get("code") == 200:
-                st.success("知识库已清空")
-                st.session_state.confirm_clear = False
+        with st.container(horizontal=True, horizontal_alignment="distribute"):
+            st.badge("未连接", icon=":material/cloud_off:", color="gray")
+            if st.button("重试", icon=":material/refresh:", key="retry_stats", width="content"):
                 refresh_kb_stats()
-                st.rerun()
-            else:
-                st.error("清空失败")
-        else:
-            st.session_state.confirm_clear = True
-            st.warning("再次点击确认清空（不可恢复）")
-            st.rerun()
+        st.caption("无法连接后端")
 
-    st.divider()
+    st.space("small")
+    st.markdown("**维护**")
 
-    # ---- 重置对话 ----
-    if st.button("🔄 新建对话", use_container_width=True):
+    if st.button("清空知识库", icon=":material/delete_forever:", width="stretch"):
+        clear_kb_dialog()
+
+    if st.button("新建对话", icon=":material/add_comment:", width="stretch"):
         st.session_state.session_id = str(uuid.uuid4())
         st.session_state.history = []
+        st.toast("已新建对话")
         st.rerun()
 
 
 # ==================== 主区域：多轮对话 ====================
-st.title("💬 RAG 知识库智能问答")
-st.caption(
-    f"多源知识融合（论文原文 + 综述解读 + 实验笔记） | "
-    f"Session: {st.session_state.session_id[:8]}"
-)
+st.title("知识库问答")
+st.caption(f"多源检索与引用溯源，会话 {st.session_state.session_id[:8]}")
 
 # 渲染历史对话
 for msg in st.session_state.history:
-    with st.chat_message(msg["role"]):
+    avatar = ":material/person:" if msg["role"] == "user" else ":material/menu_book:"
+    with st.chat_message(msg["role"], avatar=avatar):
         st.markdown(msg["content"])
-        # 引用溯源展示
-        if msg.get("citations"):
-            source_type_str = msg.get("source_type", "internal")
-            source_label = "🌐 外网引用" if source_type_str == "external" else "📚 本地知识库"
-            with st.expander(f"{source_label} - 共 {len(msg['citations'])} 条引用来源"):
-                for cit in msg["citations"]:
-                    similarity = cit.get("similarity", 0)
-                    st.markdown(
-                        f"**[{cit['citation_id']}] {cit['file_name']}** "
-                        f"(第 {cit['page']} 页 | 相似度: {similarity:.4f} | "
-                        f"来源: {cit.get('source_type', 'internal')})"
-                    )
-                    st.code(cit["original_text"][:300] + ("..." if len(cit["original_text"]) > 300 else ""))
+        render_citations(msg.get("citations"), msg.get("source_type", "internal"))
+
+# 空对话时提供建议问题
+if not st.session_state.history:
+    selected = st.pills(
+        "建议问题",
+        SUGGESTIONS,
+        label_visibility="collapsed",
+        key="starter_questions",
+    )
+    if selected:
+        ask_and_render(selected)
+        st.rerun()
 
 # 输入框
-if question := st.chat_input("请输入问题（支持多轮追问）"):
-    # 显示用户问题
-    st.session_state.history.append({"role": "user", "content": question})
-    with st.chat_message("user"):
-        st.markdown(question)
-
-    # 调用后端问答
-    with st.chat_message("assistant"):
-        with st.spinner("检索与生成中..."):
-            result = call_ask(question, st.session_state.session_id)
-        if not result:
-            st.error("问答失败，请检查后端服务是否运行")
-        elif result.get("code") != 200:
-            st.error(result.get("message", "问答失败"))
-        else:
-            data = result.get("data", {})
-            answer = data.get("answer", "")
-            citations = data.get("citations", [])
-            source_type = data.get("source_type", "internal")
-
-            st.markdown(answer)
-
-            # 显示引用
-            if citations:
-                source_label = "🌐 外网引用" if source_type == "external" else "📚 本地知识库"
-                with st.expander(f"{source_label} - 共 {len(citations)} 条引用来源"):
-                    for cit in citations:
-                        similarity = cit.get("similarity", 0)
-                        st.markdown(
-                            f"**[{cit['citation_id']}] {cit['file_name']}** "
-                            f"(第 {cit['page']} 页 | 相似度: {similarity:.4f} | "
-                            f"来源: {cit.get('source_type', 'internal')})"
-                        )
-                        st.code(cit["original_text"][:300] + ("..." if len(cit["original_text"]) > 300 else ""))
-
-            # 写入历史
-            st.session_state.history.append({
-                "role": "assistant",
-                "content": answer,
-                "citations": citations,
-                "source_type": source_type,
-            })
+if question := st.chat_input("输入问题", submit_mode="disable"):
+    ask_and_render(question)
