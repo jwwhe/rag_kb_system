@@ -103,31 +103,43 @@ def hallucination_rate(
 ) -> float:
     """
     幻觉率（启发式近似）：
-    - 若回答中既未触发兜底拒绝、又包含无依据的"我/可能/或许"等不确定词，
-      则视为潜在幻觉。
-    - 严格判断需用 Verify Prompt + LLM，本函数提供快速启发式评估。
+    - 兜底拒绝回答（明确承认不知道）→ 非幻觉，不参与统计
+    - 含溯源标记（[引用/来源: 等）→ 视为有依据，不判幻觉
+    - 无溯源且含不确定/猜测措辞（可能/或许/我猜测等）→ 潜在幻觉
+    - 严格判断需用 Verify Prompt + LLM，本函数提供快速启发式评估
 
     Args:
         answers:        生成的回答列表
         refusal_phrase: 兜底拒绝文案
 
     Returns:
-        float: 0.0 ~ 1.0，幻觉样本占比
+        float: 0.0 ~ 1.0，潜在幻觉样本占"有效回答"的比例
+        （空回答/拒绝回答不计入分母，避免稀释指标）
     """
     if not answers:
         return 0.0
-    suspicious_tokens = ["可能", "或许", "应该", "我猜测", "据我所知", "通常来说"]
+    # 不确定/猜测性措辞（幻觉高风险信号）
+    suspicious_tokens = ["可能", "或许", "大概", "我猜测", "据我所知", "推测"]
+    # 溯源标记：答案含引用/来源标注 → 视为有依据
+    citation_markers = ("[引用", "引用来源", "来源:", "来源：", "参考文献")
+
     hallucinated = 0
+    evaluated = 0
     for ans in answers:
         if not ans or not ans.strip():
+            # 生成失败的样本不参与幻觉率统计
             continue
         # 触发兜底 → 非幻觉（明确承认不知道）
         if refusal_phrase in ans:
             continue
-        # 包含不确定词 → 潜在幻觉
+        evaluated += 1
+        # 含溯源标记 → 视为有依据，不判幻觉
+        if any(m in ans for m in citation_markers):
+            continue
+        # 无溯源且含不确定词 → 潜在幻觉
         if any(tok in ans for tok in suspicious_tokens):
             hallucinated += 1
-    return hallucinated / len(answers)
+    return hallucinated / evaluated if evaluated > 0 else 0.0
 
 
 def accuracy(

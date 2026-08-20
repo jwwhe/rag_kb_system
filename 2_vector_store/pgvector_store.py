@@ -237,13 +237,21 @@ class PGVectorStore(BaseVectorStore):
         where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
         # 余弦距离检索（自动适配 vector / real[] 模式）
-        cast = "::vector" if self._use_native_vector else "::real[]"
+        if self._use_native_vector:
+            # 原生 vector：<=> 余弦距离，similarity = 1 - distance
+            sim_expr = "1 - (embedding <=> %s::vector)"
+            order_expr = "embedding <=> %s::vector"
+        else:
+            # 纯 SQL real[]：使用自建 cosine_similarity 函数
+            sim_expr = "cosine_similarity(embedding, %s::real[])"
+            order_expr = "cosine_similarity(embedding, %s::real[]) DESC"
+
         sql = f"""
             SELECT chunk_id, content, file_name, page, doc_id,
                    source_type, knowledge_base, meta_json,
-                   1 - (embedding <=> %s{cast}) AS similarity
+                   {sim_expr} AS similarity
             FROM {table}{where_sql}
-            ORDER BY embedding <=> %s{cast}
+            ORDER BY {order_expr}
             LIMIT %s
         """
         # 参数顺序：query（算 similarity）, query（ORDER BY）, where 参数, top_k
@@ -379,6 +387,39 @@ class PGVectorStore(BaseVectorStore):
             )
             with self._conn.cursor() as cur:
                 cur.execute(idx_vec)
+        else:
+            # 纯 SQL real[] 模式：`<=>` 算子依赖 pgvector 扩展，
+            # 需自建余弦相似度函数（README"无需扩展 DLL"的兼容层）
+            self._ensure_cosine_function()
+
+    def _ensure_cosine_function(self):
+        """纯 SQL real[] 模式：创建余弦相似度函数（无需 pgvector 扩展）。"""
+        sql = """
+            CREATE OR REPLACE FUNCTION cosine_similarity(a real[], b real[])
+            RETURNS double precision AS $$
+            DECLARE
+                dot double precision := 0;
+                na double precision := 0;
+                nb double precision := 0;
+                i int;
+            BEGIN
+                IF a IS NULL OR b IS NULL OR array_length(a, 1) IS NULL
+                   OR array_length(a, 1) <> array_length(b, 1) THEN
+                    RETURN 0;
+                END IF;
+                FOR i IN 1..array_length(a, 1) LOOP
+                    dot := dot + a[i]::double precision * b[i];
+                    na := na + a[i]::double precision * a[i];
+                    nb := nb + b[i]::double precision * b[i];
+                END LOOP;
+                IF na = 0 OR nb = 0 THEN RETURN 0; END IF;
+                RETURN dot / (sqrt(na) * sqrt(nb));
+            END;
+            $$ LANGUAGE plpgsql IMMUTABLE;
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(sql)
+        logger.info("pgvector: 已创建纯 SQL 余弦相似度函数 cosine_similarity")
 
     def _rows_to_documents(
         self, rows: List[tuple], with_similarity: bool = True

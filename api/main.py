@@ -38,10 +38,11 @@ app = FastAPI(
 )
 
 # CORS 配置
+# 注意：allow_origins=["*"] 时不能开启 allow_credentials（违反 CORS 规范，
+# 浏览器会拒绝带凭证的跨域请求）；本 API 为无凭证公开接口，不启用凭证。
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

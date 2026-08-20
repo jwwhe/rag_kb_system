@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional
 
 from langchain_core.documents import Document
 
+from config.settings import get_settings_cached
 from utils.logger import get_logger
 from .metrics import (
     recall_at_k,
@@ -66,7 +67,7 @@ class RAGEvaluator:
         from api.dependencies import HybridSearcher, QueryRewriter, BM25Searcher
         from api.dependencies import RAGChain
 
-        self.settings = settings
+        self.settings = settings or get_settings_cached()
         self.embedder = embedder or get_embedder()
         self.vector_store = vector_store or get_vector_store()
         self.mmr_reranker = mmr_reranker or get_mmr_reranker()

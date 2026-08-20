@@ -3,7 +3,7 @@
 基于 **六层分层 RAG 架构** 的多源知识融合智能问答系统，覆盖论文原文、综述解读、实验笔记等多场景。
 
 > **核心亮点（对齐简历）**
-> - 完整 RAG 全链路：文档加载 → 智能分块（零宽断言 `(?<=。)`，句末命中率 100%）→ BGE Embedding → PGvector 语义检索 → LLM 生成，单次问答延迟 <3s
+> - 完整 RAG 全链路：文档加载 → 智能分块（零宽断言 `(?<=。)`，chunk 句子边界对齐率显著提升）→ BGE Embedding → PGvector 语义检索 → LLM 生成，单次问答延迟 <3s
 > - 修复 LangChain 默认 `keep_separator` 陷阱，Top-3 命中率 55% → 82%
 > - **MMR + BGE-Reranker 两阶段精排**，Top-1 命中率 45% → 78%
 > - 多源知识融合（论文原文 + 综述解读 + 实验笔记），来源标注准确率 100%
@@ -52,7 +52,6 @@ rag_kb_system/
 │   ├── base.py                # 抽象接口
 │   ├── chroma_store.py        # Chroma（开发）
 │   ├── pgvector_store.py      # PGvector（生产，简历对齐）
-│   ├── qdrant_store.py        # Qdrant（兼容保留）
 │   └── factory.py             # 工厂自动切换
 ├── 3_retrieval/               # Layer 3: 检索层（核心）
 │   ├── query_rewrite.py       # 查询改写

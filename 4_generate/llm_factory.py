@@ -222,11 +222,12 @@ class LLMFactory:
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
 
         # Ollama Python API
         response = self._ollama_client.chat(
             model=self._current_model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             options={
                 "temperature": self.config.temperature,
                 "num_predict": self.config.max_tokens,

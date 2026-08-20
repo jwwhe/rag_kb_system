@@ -200,17 +200,23 @@ class RAGChain:
     def _ensure_history_recorded(
         self, session_id: str, question: str, answer: str
     ):
-        """确保问答被记录到历史（兼容性兜底）。"""
+        """确保问答被记录到历史（兼容性兜底，幂等）。"""
         try:
             from langchain_core.messages import HumanMessage, AIMessage
             history = self._history_manager.get_history(session_id)
-            # 避免重复添加（RunnableWithMessageHistory 可能已添加）
+            # 避免重复添加（RunnableWithMessageHistory 可能已自动写入）：
+            # 仅当末尾不是 (该问题, 该答案) 的完整配对时才手动补写
             existing = history.messages
-            # 简单检查最后一条是否为该 answer
-            if not (existing and isinstance(existing[-1], AIMessage)
-                    and existing[-1].content == answer):
-                history.add_user_message(question)
-                history.add_ai_message(answer)
+            if (
+                len(existing) >= 2
+                and isinstance(existing[-2], HumanMessage)
+                and isinstance(existing[-1], AIMessage)
+                and existing[-2].content == question
+                and existing[-1].content == answer
+            ):
+                return
+            history.add_user_message(question)
+            history.add_ai_message(answer)
         except Exception as e:
             logger.warning(f"历史记录写入失败: {e}")
 

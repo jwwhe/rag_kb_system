@@ -53,6 +53,7 @@ class CitationTracer:
         - similarity:    相似度分数
         - source_type:   来源类型（internal / external）
         - doc_source:    文档来源类型（论文原文/综述解读/实验笔记，仅内部库）
+        - url:           来源链接（仅外部网络搜索）
 
         Args:
             documents:   检索结果文档列表
@@ -65,20 +66,26 @@ class CitationTracer:
             return []
 
         citations = []
+        citation_id = 0
 
-        for i, doc in enumerate(documents, 1):
+        for doc in documents:
             similarity = doc.metadata.get(
                 "rerank_score",
                 doc.metadata.get("hybrid_score",
                 doc.metadata.get("similarity", 0)),
             )
 
-            # 低相似度过滤
-            if similarity < self.config.citation_min_similarity:
+            # 低相似度过滤（仅内部知识库生效：
+            # 外部网络结果无向量相似度概念，similarity 恒为 0，不应被过滤）
+            if (
+                source_type == "internal"
+                and similarity < self.config.citation_min_similarity
+            ):
                 continue
 
+            citation_id += 1
             citation = {
-                "citation_id": i,
+                "citation_id": citation_id,
                 "file_name": doc.metadata.get("file_name", "未知来源"),
                 "page": doc.metadata.get("page", "N/A"),
                 "original_text": doc.page_content[:200] + (
@@ -87,11 +94,14 @@ class CitationTracer:
                 "similarity": round(similarity, 4),
                 "source_type": source_type,
             }
-            # 多源知识融合：透传文档自身的来源类型（论文原文/综述解读/实验笔记）
             if source_type == "internal":
+                # 多源知识融合：透传文档自身的来源类型（论文原文/综述解读/实验笔记）
                 citation["doc_source"] = doc.metadata.get(
                     "source_type", "论文原文"
                 )
+            else:
+                # 外网溯源：绑定来源 URL（README"外网标注 + URL 溯源"）
+                citation["url"] = doc.metadata.get("url", "")
             citations.append(citation)
 
         # 统计来源分布
@@ -147,8 +157,8 @@ class CitationTracer:
             parts.append("\n【外部网络搜索来源】")
             for c in external_citations:
                 parts.append(
-                    f"  [{c['citation_id']}] {c['file_name']} | "
-                    f"相关度: {c['similarity']}\n"
+                    f"  [{c['citation_id']}] {c['file_name']}\n"
+                    f"      链接: {c.get('url', 'N/A')}\n"
                     f"      原文: \"{c['original_text']}\""
                 )
 

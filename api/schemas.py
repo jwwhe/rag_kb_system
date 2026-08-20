@@ -50,6 +50,7 @@ class CitationItem(BaseModel):
     original_text: str = Field(..., description="原文片段")
     similarity: float = Field(..., description="相似度分数")
     source_type: str = Field(..., description="来源类型: internal/external")
+    url: Optional[str] = Field(default=None, description="来源链接（仅外部网络搜索）")
 
 
 class SourceStats(BaseModel):
@@ -78,7 +79,7 @@ class FileUploadResponse(BaseModel):
 
 class KBStatsResponse(BaseModel):
     """知识库统计响应"""
-    store_type: str = Field(..., description="向量库类型: chroma/qdrant")
+    store_type: str = Field(..., description="向量库类型: pgvector/chroma")
     collection_name: str = Field(..., description="集合名称")
     total_chunks: int = Field(0, description="总块数")
     total_files: int = Field(0, description="总文件数")

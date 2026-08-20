@@ -8,6 +8,7 @@
 ================================================================================
 """
 import importlib
+import re
 from typing import List, Optional, Callable
 
 from langchain_core.documents import Document
@@ -28,6 +29,21 @@ class CorrectiveRAG:
     纠正型 RAG (Corrective RAG)。
     对 LLM 生成的答案进行自检，发现并修正幻觉内容。
     """
+
+    # 问题关键词（回退扫描用）
+    # 注意：不能包含否定式短语（如"不存在""没有提到"），
+    # 否则"不存在幻觉问题"等健康表述会被误判为有问题
+    _problem_keywords = [
+        "缺乏依据", "无出处", "找不到", "编造", "虚构",
+        "矛盾", "不一致", "错误", "幻觉",
+        "无原文支持", "未在文档中",
+    ]
+
+    # 否定语境前缀（出现时，紧跟的问题关键词不触发修正）
+    # 例："不存在幻觉问题""未发现错误""没有编造内容"
+    _NEGATION_PREFIXES = (
+        "不存在", "未发现", "没有", "无需", "不是", "未出现", "不涉及",
+    )
 
     def __init__(self, config: Optional[EnhanceConfig] = None):
         """
@@ -112,8 +128,9 @@ class CorrectiveRAG:
         """
         根据审核结果判断答案是否无幻觉。
 
-        简单判断逻辑：如果审核结果中没有明确的负面关键词，
-        则认为审核通过。
+        优先解析结构化结论行（"结论：通过 / 结论：需要修正"）；
+        解析失败时回退到关键词扫描，且识别否定语境
+        （如"不存在幻觉问题""未发现错误"不会被误判为有问题）。
 
         Args:
             review_result: LLM 审核输出
@@ -121,13 +138,47 @@ class CorrectiveRAG:
         Returns:
             bool: True 表示无问题，False 表示有问题需要修正
         """
-        problem_keywords = [
-            "缺乏依据", "无出处", "找不到", "编造", "虚构",
-            "不存在", "矛盾", "不一致", "错误", "幻觉",
-            "无原文支持", "未在文档中", "没有提到",
-        ]
+        verdict = self._extract_verdict(review_result)
+        if verdict is not None:
+            return verdict
+
+        # 回退：关键词扫描（排除否定语境，避免误判）
         result_lower = review_result.lower()
-        return not any(kw in result_lower for kw in problem_keywords)
+        for kw in self._problem_keywords:
+            start = 0
+            while True:
+                idx = result_lower.find(kw, start)
+                if idx == -1:
+                    break
+                prefix = result_lower[max(0, idx - 6):idx]
+                if not any(neg in prefix for neg in self._NEGATION_PREFIXES):
+                    return False
+                start = idx + len(kw)
+        return True
+
+    def _extract_verdict(self, review_result: str):
+        """
+        从审核结果中解析结构化结论行。
+
+        Returns:
+            Optional[bool]: True=通过, False=需要修正, None=无法解析
+        """
+        for line in reversed(review_result.strip().split("\n")):
+            line = line.strip()
+            if not line:
+                continue
+            m = re.search(r"结论[:：]\s*(.+)", line)
+            if not m:
+                continue
+            verdict_text = m.group(1)
+            if any(k in verdict_text for k in
+                   ("通过", "无需", "无问题", "没问题", "不需要修正", "无需修正")):
+                return True
+            if any(k in verdict_text for k in
+                   ("修正", "有问题", "存在", "错误", "幻觉", "不符", "剔除", "删除", "缺乏")):
+                return False
+            return None  # 结论行无法识别，交由回退逻辑
+        return None
 
     def _rewrite_answer(
         self,

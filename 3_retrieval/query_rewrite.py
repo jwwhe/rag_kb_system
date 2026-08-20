@@ -9,11 +9,16 @@
     - 规则引擎 + LLM 增强（LLM callable 由 API 层注入，保持分层解耦）
 ================================================================================
 """
+import importlib
 import re
 from typing import List, Optional, Callable
 
 from config.settings import RetrievalConfig, get_settings_cached
 from utils.logger import get_logger
+
+# Python 不允许直接 import 数字开头的包名，使用 importlib 动态导入
+_pg = importlib.import_module("4_generate.prompts")
+PromptTemplates = _pg.PromptTemplates
 
 logger = get_logger(__name__)
 
@@ -49,8 +54,11 @@ class QueryRewriter:
         }
 
         # 常见指代词模式（补全用）
+        # 注意：避免裸"这/那"替换（会误伤"这里/那边/这个"等正常词），
+        # 只替换完整指代词；"它们"必须先于"它"匹配，否则变成"该内容们"
         self._pronoun_patterns = [
-            (r"这个|那个|它|这|那", "该内容"),
+            (r"这个|那个|这些|那些", "该内容"),
+            (r"它们|它", "该内容"),
             (r"上文|上述|前面提到", "前述内容"),
             (r"如下|以下", "下述内容"),
         ]
@@ -152,34 +160,15 @@ class QueryRewriter:
         Returns:
             List[str]: LLM 生成的同义查询列表
         """
-        prompt = self._build_rewrite_prompt(query)
-        response = llm_call(prompt)
+        # 复用 prompts.py 的统一改写模板（避免两套 Prompt 漂移）
+        system_prompt, user_prompt = PromptTemplates.build_rewrite_prompt(
+            query, self.config.max_sub_questions
+        )
+        response = llm_call(f"{system_prompt}\n\n{user_prompt}")
 
         # 解析 LLM 返回的子问题列表
         sub_queries = self._parse_sub_queries(response)
         return sub_queries
-
-    def _build_rewrite_prompt(self, query: str) -> str:
-        """
-        构建查询改写 Prompt。
-
-        Args:
-            query: 原始查询
-
-        Returns:
-            str: 改写 Prompt
-        """
-        return f"""你是一个查询改写助手。请将用户的口语化问题改写为适合在知识库中检索的专业查询，并生成{self.config.max_sub_questions}个同义子问题。
-
-用户问题：{query}
-
-要求：
-1. 将口语表达转换为专业/书面表达
-2. 补全不清晰的指代
-3. 生成{self.config.max_sub_questions}个不同角度的同义查询
-4. 每行输出一个查询，不要编号
-
-改写结果："""
 
     def _parse_sub_queries(self, response: str) -> List[str]:
         """
