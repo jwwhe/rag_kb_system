@@ -46,6 +46,7 @@ rag_kb_system/
 ├── utils/                     # 通用工具（response / exceptions / logger）
 ├── 1_doc_process/             # Layer 1: 文档处理层
 │   ├── loader.py              # PDF/Word/Markdown 多格式加载 + 多源标注
+│   ├── ocr.py                 # OCR 识别（PDF 图片/扫描件，RapidOCR）
 │   ├── splitter.py            # 零宽断言分块 (800/150, keep_separator=False)
 │   └── embedder.py            # bge-m3 向量化
 ├── 2_vector_store/            # Layer 2: 向量存储层

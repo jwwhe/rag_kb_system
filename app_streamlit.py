@@ -69,13 +69,18 @@ init_session_state()
 
 
 # ==================== API 调用封装 ====================
-def call_upload(files, source_type: str, knowledge_base: str):
+def call_upload(files, source_type: str, knowledge_base: str, enable_ocr: bool = False):
     """调用后端文档上传接口。"""
     url = f"{st.session_state.api_base}/documents/upload"
     multipart = [("files", (f.name, f.read(), "application/octet-stream")) for f in files]
-    data = {"source_type": source_type, "knowledge_base": knowledge_base}
+    data = {
+        "source_type": source_type,
+        "knowledge_base": knowledge_base,
+        "enable_ocr": enable_ocr,
+    }
     try:
-        resp = requests.post(url, files=multipart, data=data, timeout=300)
+        # 大文件 + OCR 处理可达数分钟，超时放宽到 15 分钟
+        resp = requests.post(url, files=multipart, data=data, timeout=900)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as e:
@@ -264,6 +269,11 @@ with st.sidebar:
             value="default",
             help="文档所属知识库",
         )
+        enable_ocr = st.toggle(
+            "识别图片/扫描件（OCR）",
+            value=False,
+            help="PDF 含图片或为扫描件时启用，可提取图中文字（首次使用需下载 OCR 模型）",
+        )
         submitted = st.form_submit_button(
             "入库",
             type="primary",
@@ -275,8 +285,8 @@ with st.sidebar:
         if not uploaded_files:
             st.warning("请先选择文件", icon=":material/upload_file:")
         else:
-            with st.spinner("正在处理文档"):
-                result = call_upload(uploaded_files, source_type, knowledge_base)
+            with st.spinner("正在处理文档（OCR/向量化较慢，请耐心等待）"):
+                result = call_upload(uploaded_files, source_type, knowledge_base, enable_ocr)
             if result and result.get("code") == 200:
                 st.success(result.get("message", "上传成功"), icon=":material/check_circle:")
                 with st.container(border=True):

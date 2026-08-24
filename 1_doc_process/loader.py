@@ -5,6 +5,7 @@
     - 支持 PDF / Word(.docx) / Markdown(.md/.markdown) 三种格式
     - 自动按扩展名分发到对应 LangChain Loader
     - 自动过滤空白行、页眉页脚、无效冗余内容
+    - PDF 图片/扫描件支持 OCR 识别（RapidOCR，需启用 enable_ocr 配置）
     - 支持多源类型标注（论文原文 / 综述解读 / 实验笔记）用于多源知识融合
     - 返回结构化的文档对象列表
 ================================================================================
@@ -88,6 +89,12 @@ class DocumentLoader:
         try:
             loader = self._get_langchain_loader(file_path, ext)
             documents = loader.load()
+
+            # OCR：PDF 含图片/扫描件时识别文本
+            # 必须在清洗前执行——扫描页提取出的文本为空，会被 _clean_documents 过滤掉
+            if ext == ".pdf" and self.config.enable_ocr:
+                documents = self._apply_ocr(documents, file_path)
+
             logger.info(
                 f"文档加载成功: {file_path} | 格式: {ext} | 共 {len(documents)} 个块/页"
             )
@@ -182,6 +189,82 @@ class DocumentLoader:
         else:
             raise DocumentProcessError(f"未实现的加载器: {ext}")
 
+    def _apply_ocr(
+        self, documents: List[Document], file_path: str
+    ) -> List[Document]:
+        """
+        对 PDF 应用 OCR：
+          - 扫描页（文本稀疏/为空）→ 整页识别，替换/追加文本
+          - 文本页 → 识别内嵌图片（图表/截图）
+        引擎不可用时优雅降级，返回原文档列表。
+
+        Args:
+            documents: PyPDFLoader 按页产出的文档列表
+            file_path: PDF 文件路径
+
+        Returns:
+            List[Document]: 追加了 OCR 文本的文档列表
+        """
+        if not documents:
+            return documents
+
+        # 延迟导入，避免 OCR 未启用时引入重型依赖
+        from .ocr import get_ocr_engine
+
+        engine = get_ocr_engine(self.config)
+        if not engine.is_available():
+            logger.warning("OCR 引擎不可用，跳过 OCR 流程")
+            return documents
+
+        try:
+            pdf = engine.fitz.open(file_path)
+        except Exception as e:
+            logger.warning(f"PDF 打开失败，跳过 OCR: {type(e).__name__}: {e}")
+            return documents
+
+        logger.info(
+            f"OCR 开始: {file_path} | 共 {len(pdf)} 页 | "
+            f"扫描页判定阈值: {self.config.ocr_min_chars_per_page} 字符/页"
+        )
+
+        enriched = []
+        ocr_pages = 0
+        try:
+            for doc in documents:
+                page_num = doc.metadata.get("page", 0)
+                if page_num >= len(pdf):  # 越界保护
+                    enriched.append(doc)
+                    continue
+
+                raw_text = doc.page_content or ""
+                ocr_text = engine.ocr_page(pdf, page_num, raw_text).strip()
+                if not ocr_text:
+                    enriched.append(doc)
+                    continue
+
+                # 扫描页无文本层 → 直接使用 OCR 结果；有残文 → 追加保留
+                if raw_text.strip():
+                    merged = f"{raw_text.strip()}\n\n[OCR识别]\n{ocr_text}"
+                else:
+                    merged = f"[OCR识别]\n{ocr_text}"
+
+                new_doc = Document(
+                    page_content=merged,
+                    metadata=dict(doc.metadata),
+                )
+                new_doc.metadata["ocr_processed"] = True
+                enriched.append(new_doc)
+                ocr_pages += 1
+                if ocr_pages % 10 == 0:
+                    # 每 10 页打一条进度，便于长任务时确认后端仍在工作
+                    logger.info(f"OCR 进行中: {file_path} | 已识别 {ocr_pages} 页")
+        finally:
+            pdf.close()
+
+        if ocr_pages:
+            logger.info(f"OCR 完成: {file_path} | 共识别 {ocr_pages} 页")
+        return enriched
+
     def _clean_documents(
         self,
         documents: List[Document],
@@ -212,12 +295,15 @@ class DocumentLoader:
             # 按行过滤
             lines = raw_text.split("\n")
             valid_lines = []
+            in_ocr_block = False  # [OCR识别] 之后的 OCR 文本豁免短行过滤
 
             for line in lines:
                 stripped = line.strip()
+                if stripped.startswith("[OCR识别]"):
+                    in_ocr_block = True
                 if self.config.filter_blank_lines and not stripped:
                     continue
-                if len(stripped) < self.config.min_line_length:
+                if not in_ocr_block and len(stripped) < self.config.min_line_length:
                     continue
                 valid_lines.append(stripped)
 

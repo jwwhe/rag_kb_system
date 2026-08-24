@@ -28,6 +28,15 @@ class DocProcessConfig:
     # PDF 加载
     pdf_loader: str = "PyPDFLoader"  # 指定 PDF 加载器
 
+    # OCR 识别（PDF 含图片 / 扫描件时启用）
+    # 引擎：RapidOCR（PaddleOCR 的 ONNX 版，中英文开箱即用，pip 安装 rapidocr-onnxruntime）
+    enable_ocr: bool = False  # 总开关（也可通过环境变量 OCR_ENABLE=1 开启）
+    ocr_engine: str = "rapidocr"  # "rapidocr" | "none"
+    ocr_min_chars_per_page: int = 50  # 单页文本低于此字符数视为扫描页，整页 OCR
+    ocr_embedded_images: bool = True  # 是否识别文本页中的内嵌图片（图表/截图）
+    ocr_confidence_threshold: float = 0.5  # 低于此置信度的识别结果丢弃
+    ocr_render_dpi: int = 200  # 扫描页渲染分辨率（越高越清晰，越慢）
+
     # 文本清洗：过滤空白行、页眉页脚、无效冗余
     filter_blank_lines: bool = True
     filter_header_footer: bool = True
@@ -223,6 +232,9 @@ def get_settings() -> Settings:
         settings.vector_store.pg_database = os.getenv("PG_DATABASE", "rag_kb")
         settings.vector_store.pg_user = os.getenv("PG_USER", "rag")
         settings.vector_store.pg_password = os.getenv("PG_PASSWORD", "rag123")
+
+    # OCR 开关（两个环境共用）
+    settings.doc_process.enable_ocr = os.getenv("OCR_ENABLE", "0").lower() in ("1", "true", "yes")
 
     return settings
 

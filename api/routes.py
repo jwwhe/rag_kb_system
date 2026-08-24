@@ -10,6 +10,9 @@
 import os
 import uuid
 import tempfile
+import asyncio
+import threading
+import dataclasses
 from pathlib import Path
 from typing import List, Optional
 
@@ -66,64 +69,62 @@ ALLOWED_EXTENSIONS = (".pdf", ".docx", ".md", ".markdown")
 
 # ==================== 1. 多格式文档批量上传入库 ====================
 
-@router.post(
-    "/documents/upload",
-    response_model=dict,
-    tags=["文档管理"],
-    summary="上传 PDF/Word/Markdown 文件并入库",
-)
-async def upload_documents(
-    files: List[UploadFile] = File(...),
-    source_type: str = Form("论文原文", description="来源类型: 论文原文/综述解读/实验笔记"),
-    knowledge_base: str = Form("default", description="所属知识库标识"),
-):
+# 上传处理全局串行锁：
+# 各层组件为进程级单例（PG 单连接 / OCR 引擎 / BM25 索引），
+# 且 CPU 密集处理（OCR/分块/向量化）不应与问答并发抢占，
+# 故所有上传串行执行（上传本身低频且耗时，串行可接受）
+_UPLOAD_LOCK = threading.Lock()
+
+
+def _process_upload_sync(
+    contents: List[bytes],
+    filenames: List[str],
+    source_type: str,
+    knowledge_base: str,
+    enable_ocr: bool,
+    _lock: threading.Lock = None,
+) -> List[dict]:
     """
-    批量上传文件，完成：
-    1. 多格式文本提取（PDF / Word / Markdown）
-    2. 零宽断言分块（chunk_size=800, overlap=150）
-    3. bge-m3 向量化
-    4. 存入 PGvector 向量数据库（带 source_type 多源标注）
+    同步执行完整上传流水线（在独立线程中运行，避免阻塞事件循环）。
+    返回 FileUploadResponse 的 dict 列表；异常统一转为 HTTPException。
     """
+    if _lock is not None:
+        # 递归一次：持锁运行实际处理（避免整体重缩进）
+        with _lock:
+            return _process_upload_sync(
+                contents, filenames, source_type, knowledge_base, enable_ocr
+            )
     settings = get_settings()
 
-    # 校验文件格式
-    for file in files:
-        if not file.filename:
-            raise HTTPException(status_code=400, detail="文件名不能为空")
-        ext = Path(file.filename).suffix.lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"仅支持 {ALLOWED_EXTENSIONS} 格式文件: {file.filename}",
-            )
-
-    # 初始化各层组件
+    # 初始化各层组件（本次请求指定 OCR 时按请求覆盖配置）
     loader = DocumentLoader()
+    if enable_ocr:
+        loader = DocumentLoader(
+            dataclasses.replace(
+                get_settings().doc_process,
+                enable_ocr=True,
+            )
+        )
     splitter = TextSplitter()
     embedder = get_embedder()
     vector_store = get_vector_store()
 
     results = []
-    for file in files:
+    for filename, content in zip(filenames, contents):
         tmp_path = None
         try:
-            # 读取上传文件内容
-            await file.seek(0)
-            content = await file.read()
             logger.info(
-                f"接收文件: name={file.filename}, "
-                f"content_type={file.content_type}, "
-                f"size={len(content)} bytes, "
+                f"接收文件: name={filename}, size={len(content)} bytes, "
                 f"source_type={source_type}"
             )
             if not content or len(content) == 0:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"上传的文件为空: {file.filename}",
+                    detail=f"上传的文件为空: {filename}",
                 )
 
             # 写入临时文件（保留原始扩展名，便于 loader 分发）
-            ext = Path(file.filename).suffix.lower()
+            ext = Path(filename).suffix.lower()
             tmp_fd, tmp_path = tempfile.mkstemp(suffix=ext)
             os.close(tmp_fd)
             with open(tmp_path, "wb") as f:
@@ -131,19 +132,19 @@ async def upload_documents(
 
             logger.info(f"临时文件已写入: {tmp_path} ({len(content)} bytes)")
 
-            # Layer 1: 文档处理（带多源标注）
+            # Layer 1: 文档处理（带多源标注，含可选 OCR）
             documents = loader.load_single(
                 tmp_path, source_type=source_type, knowledge_base=knowledge_base
             )
             if not documents:
-                raise DocumentProcessError(f"文档解析无有效内容: {file.filename}")
+                raise DocumentProcessError(f"文档解析无有效内容: {filename}")
 
             # 文本分块
             chunks = splitter.split_documents(documents)
 
             # 修正元数据：用原始文件名覆盖 loader 的临时文件名
             for chunk in chunks:
-                chunk.metadata["file_name"] = file.filename
+                chunk.metadata["file_name"] = filename
 
             # 向量化
             chunks = embedder.embed_documents(chunks)
@@ -157,24 +158,24 @@ async def upload_documents(
             ensure_bm25_index()
 
             results.append(FileUploadResponse(
-                file_name=file.filename,
+                file_name=filename,
                 pages=len(documents),
                 chunks=len(chunks),
                 message=f"上传并入库成功（来源: {source_type}）",
-            ))
+            ).model_dump())
 
             logger.info(
-                f"文件上传成功: {file.filename} | "
+                f"文件上传成功: {filename} | "
                 f"{len(documents)} 段 → {len(chunks)} 块 | 来源: {source_type}"
             )
 
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"文件上传失败 [{file.filename}]: {type(e).__name__}: {e}")
+            logger.error(f"文件上传失败 [{filename}]: {type(e).__name__}: {e}")
             raise HTTPException(
                 status_code=500,
-                detail=f"文件 {file.filename} 处理失败: {type(e).__name__}: {str(e)}",
+                detail=f"文件 {filename} 处理失败: {type(e).__name__}: {str(e)}",
             )
 
         finally:
@@ -184,8 +185,62 @@ async def upload_documents(
                 except Exception:
                     pass
 
+    return results
+
+
+@router.post(
+    "/documents/upload",
+    response_model=dict,
+    tags=["文档管理"],
+    summary="上传 PDF/Word/Markdown 文件并入库",
+)
+async def upload_documents(
+    files: List[UploadFile] = File(...),
+    source_type: str = Form("论文原文", description="来源类型: 论文原文/综述解读/实验笔记"),
+    knowledge_base: str = Form("default", description="所属知识库标识"),
+    enable_ocr: bool = Form(False, description="启用 OCR 识别 PDF 图片/扫描件（仅本次上传生效）"),
+):
+    """
+    批量上传文件，完成：
+    1. 多格式文本提取（PDF / Word / Markdown，可选 OCR 识别 PDF 图片/扫描件）
+    2. 零宽断言分块（chunk_size=800, overlap=150）
+    3. bge-m3 向量化
+    4. 存入 PGvector 向量数据库（带 source_type 多源标注）
+
+    说明：OCR/分块/向量化耗时较长（扫描件每页约数秒），
+    处理在后台线程执行，客户端需耐心等待；期间其他接口不受影响。
+    """
+    # 校验文件格式
+    for file in files:
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="文件名不能为空")
+        ext = Path(file.filename).suffix.lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"仅支持 {ALLOWED_EXTENSIONS} 格式文件: {file.filename}",
+            )
+
+    # 先异步读完所有文件（网络 I/O，不占用处理线程）
+    contents, filenames = [], []
+    for file in files:
+        await file.seek(0)
+        contents.append(await file.read())
+        filenames.append(file.filename)
+
+    # 重活移入线程池，避免阻塞事件循环（其他接口仍可用）
+    results = await asyncio.to_thread(
+        _process_upload_sync,
+        contents,
+        filenames,
+        source_type,
+        knowledge_base,
+        enable_ocr,
+        _lock=_UPLOAD_LOCK,
+    )
+
     return success_response(
-        data=[r.model_dump() for r in results],
+        data=results,
         message=f"成功上传 {len(results)} 个文件",
     ).to_dict()
 
