@@ -312,9 +312,10 @@ with st.sidebar:
             st.badge("已连接", icon=":material/cloud_done:", color="green")
             if st.button("刷新", icon=":material/refresh:", key="refresh_stats", width="content"):
                 refresh_kb_stats()
-        st.metric("向量库", stats_data.get("store_type", "-"))
-        st.metric("总块数", stats_data.get("total_chunks", 0))
-        st.metric("文件数", stats_data.get("total_files", 0))
+        st.caption(f"向量库：{stats_data.get('store_type', '-')}")
+        c1, c2 = st.columns(2)
+        c1.metric("文档块", stats_data.get("total_chunks", 0))
+        c2.metric("文件数", stats_data.get("total_files", 0))
 
         file_names = stats_data.get("file_names", [])
         with st.expander(f"文件列表 · {len(file_names)}", icon=":material/description:"):
@@ -360,8 +361,8 @@ with st.sidebar:
 
 
 # ==================== 主区域：多轮对话 ====================
-st.title("知识库问答")
-st.caption(f"多源检索与引用溯源，会话 {st.session_state.session_id[:8]}")
+st.title(":material/auto_stories: 知识库问答")
+st.caption(f"多源检索 · 引用溯源 · 会话 {st.session_state.session_id[:8]}")
 
 # 渲染历史对话
 for msg in st.session_state.history:
