@@ -1,6 +1,6 @@
 """
 ================================================================================
-  Layer 2 - 向量存储层: Chroma 实现（开发环境）
+  Layer 2 - 向量存储层: Chroma 实现（默认向量库）
   功能：
     - Chroma 本地持久化存储
     - 完整实现 BaseVectorStore 全部接口
@@ -26,7 +26,7 @@ logger = get_logger(__name__)
 class ChromaVectorStore(BaseVectorStore):
     """
     基于 Chroma 的向量存储实现。
-    用于开发环境，数据持久化到本地磁盘。
+    数据持久化到本地磁盘。
     """
 
     def __init__(self, config: Optional[VectorStoreConfig] = None):

@@ -1,7 +1,7 @@
 # ============================================================================
 #  RAG 知识库问答系统 - Docker Compose 编排
 #  启动：docker compose -f docker/docker-compose.yml up -d
-#  服务：FastAPI(8000) + Streamlit(8501) + PGvector(5432)
+#  服务：FastAPI(8000) + Streamlit(8501) + Chroma(本地持久化向量库)
 #  LLM 使用 DeepSeek API（无需 Ollama）
 # ============================================================================
 
@@ -16,7 +16,8 @@ services:
       - "8000:8000"
     environment:
       - ENV=production
-      - STORE_TYPE=pgvector
+      - STORE_TYPE=chroma
+      - CHROMA_PERSIST_DIR=/app/data/chroma_db
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - QWEN_API_KEY=${QWEN_API_KEY:-}
       - PG_HOST=pgvector
@@ -27,9 +28,10 @@ services:
       - HF_ENDPOINT=https://hf-mirror.com
     volumes:
       - hf_cache:/root/.cache/huggingface   # 模型缓存持久化
+      - chroma_data:/app/data/chroma_db     # Chroma 向量库持久化
     depends_on:
       pgvector:
-        condition: service_healthy
+        condition: service_started
     restart: unless-stopped
     networks:
       - rag-network
@@ -51,7 +53,7 @@ services:
     networks:
       - rag-network
 
-  # ==================== PGvector 向量数据库 ====================
+  # ==================== PGvector 向量数据库（可选，STORE_TYPE=pgvector 时才使用）====================
   pgvector:
     image: pgvector/pgvector:pg16
     container_name: rag-pgvector
@@ -74,6 +76,8 @@ services:
 
 volumes:
   pgvector_data:
+    driver: local
+  chroma_data:
     driver: local
   hf_cache:
     driver: local

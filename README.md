@@ -46,13 +46,14 @@ rag_kb_system/
 ├── utils/                     # 通用工具（response / exceptions / logger）
 ├── 1_doc_process/             # Layer 1: 文档处理层
 │   ├── loader.py              # PDF/Word/Markdown 多格式加载 + 多源标注
+│   ├── cleaner.py             # 结构化清洗（版式噪声/页眉页脚/断词，保留 MD 结构）
 │   ├── ocr.py                 # OCR 识别（PDF 图片/扫描件，RapidOCR）
 │   ├── splitter.py            # 零宽断言分块 (800/150, keep_separator=False)
 │   └── embedder.py            # bge-m3 向量化
 ├── 2_vector_store/            # Layer 2: 向量存储层
 │   ├── base.py                # 抽象接口
-│   ├── chroma_store.py        # Chroma（开发）
-│   ├── pgvector_store.py      # PGvector（生产，简历对齐）
+│   ├── chroma_store.py        # Chroma（默认）
+│   ├── pgvector_store.py      # PGvector（可选后端）
 │   └── factory.py             # 工厂自动切换
 ├── 3_retrieval/               # Layer 3: 检索层（核心）
 │   ├── query_rewrite.py       # 查询改写
@@ -78,7 +79,7 @@ rag_kb_system/
 ├── api/                       # FastAPI 接口层
 │   ├── main.py / routes.py / schemas.py / dependencies.py
 ├── app_streamlit.py           # Streamlit 前端入口
-├── docker/                    # Dockerfile + docker-compose（PGvector + Streamlit）
+├── docker/                    # Dockerfile + docker-compose（Chroma + Streamlit）
 ├── requirements.txt
 └── run.py
 ```
@@ -90,7 +91,8 @@ rag_kb_system/
 ### 3.1 环境要求
 
 - Python 3.10+
-- PostgreSQL 16（已安装到 `D:\PostgreSQL\16\`，纯 SQL pgvector 兼容层）
+- 向量库 Chroma（pip 依赖，本地文件持久化，无需外部服务）
+- PostgreSQL 16（可选，仅 `STORE_TYPE=pgvector` 时需要）
 
 ### 3.2 安装依赖
 
@@ -138,16 +140,16 @@ TRANSFORMERS_OFFLINE=1
 
 ### 3.6 Docker 部署（可选，仅需 FastAPI + Streamlit 镜像）
 
-PGvector 和 LLM 均使用宿主机资源，Docker 只打包应用层：
+向量库 Chroma 持久化到 `chroma_data` 卷，LLM 使用宿主机 API Key：
 
 ```bash
-# 前置条件：宿主机 PostgreSQL 已启动（D:\PostgreSQL\16\）
-#           DEEPSEEK_API_KEY 已设置
+# 前置条件：DEEPSEEK_API_KEY 已设置
 
 docker compose -f docker/docker-compose.yml up -d
 # 启动：FastAPI(8000) + Streamlit(8501)
-# PGvector → 自动连接宿主机 PostgreSQL（host.docker.internal:5432）
+# Chroma → 本地持久化（命名卷 chroma_data → /app/data/chroma_db）
 # LLM     → 使用 DeepSeek API（无需本地 GPU / Ollama）
+# 如需 PGvector：STORE_TYPE=pgvector，compose 已内置 pgvector 服务
 ```
 
 ---
@@ -225,7 +227,7 @@ DELETE /api/v1/kb/clear
 | 环境变量 | 说明 | 默认值 |
 |----------|------|--------|
 | `ENV` | 运行环境 | development |
-| `STORE_TYPE` | 向量库类型 (pgvector / chroma) | pgvector |
+| `STORE_TYPE` | 向量库类型 (chroma / pgvector) | chroma |
 | `PG_HOST` / `PG_PORT` / `PG_DATABASE` / `PG_USER` / `PG_PASSWORD` | PGvector 连接 | localhost/5432/rag_kb/rag/rag123 |
 | `DEEPSEEK_API_KEY` / `QWEN_API_KEY` | LLM API Key | - |
 | `OLLAMA_HOST` | Ollama 服务地址 | http://localhost:11434 |
@@ -236,6 +238,10 @@ DELETE /api/v1/kb/clear
 
 | 参数 | 值 | 层级 |
 |------|-----|------|
+| 清洗开关 enable_cleaning | True（关闭则原文透传） | Layer 1 |
+| min_line_length | 10（仅约束正文散行） | Layer 1 |
+| 页眉页脚判定 clean_header_footer_min_pages | 3 | Layer 1 |
+| 乱码占比阈值 clean_garbage_line_ratio | 0.6 | Layer 1 |
 | chunk_size / chunk_overlap | 800 / 150 | Layer 1 |
 | 分块策略 | 零宽断言 `(?<=。)` + keep_separator=False | Layer 1 |
 | 嵌入模型 | BAAI/bge-m3 | Layer 1 |
@@ -292,8 +298,7 @@ BGE-Reranker 精排 (Top3)                        ← 两阶段第二阶段
 | 文档加载 | PyPDFLoader / python-docx / UnstructuredMarkdown |
 | 文本分割 | 零宽断言 `(?<=。)` + keep_separator=False |
 | 嵌入模型 | BAAI/bge-m3 |
-| 开发向量库 | Chroma |
-| 生产向量库 | **PGvector**（PostgreSQL + 纯 SQL 兼容层，无需扩展 DLL） |
+| 向量存储 | **Chroma**（本地持久化，默认）/ PGvector（可选，需外部 PostgreSQL） |
 | 关键词检索 | BM25 + jieba 分词 |
 | 多样性去重 | MMR (Maximal Marginal Relevance) |
 | 重排模型 | BAAI/bge-reranker-v2-m3 |

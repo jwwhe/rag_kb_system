@@ -4,7 +4,8 @@
   功能：
     - 支持 PDF / Word(.docx) / Markdown(.md/.markdown) 三种格式
     - 自动按扩展名分发到对应 LangChain Loader
-    - 自动过滤空白行、页眉页脚、无效冗余内容
+    - 结构化文本清洗（TextCleaner）：字符归一化、断词拼接、页码/页眉页脚/乱码过滤
+    - 保留 Markdown 结构与代码块，避免短行误删标题与围栏
     - PDF 图片/扫描件支持 OCR 识别（RapidOCR，需启用 enable_ocr 配置）
     - 支持多源类型标注（论文原文 / 综述解读 / 实验笔记）用于多源知识融合
     - 返回结构化的文档对象列表
@@ -20,6 +21,8 @@ from langchain_core.documents import Document
 from config.settings import DocProcessConfig, get_settings_cached
 from utils.exceptions import DocumentProcessError
 from utils.logger import get_logger
+
+from .cleaner import TextCleaner
 
 logger = get_logger(__name__)
 
@@ -45,6 +48,7 @@ class DocumentLoader:
             config: 文档处理配置（默认从全局配置读取）
         """
         self.config = config or get_settings_cached().doc_process
+        self._cleaner = TextCleaner(self.config)
         logger.info(
             f"DocumentLoader 初始化完成 | "
             f"支持格式: {sorted(self.SUPPORTED_EXTENSIONS)} | "
@@ -273,43 +277,27 @@ class DocumentLoader:
         knowledge_base: str,
     ) -> List[Document]:
         """
-        清洗文档内容：过滤空白行、无效短行、页眉页脚冗余。
-        同时绑定多源元数据（source_type / knowledge_base）。
+        清洗文档内容（委托 TextCleaner：字符归一 → 断词拼接 → 页眉页脚/版式噪声
+        → 短行过滤，并保留 Markdown 结构与代码块），同时绑定多源元数据。
 
         Args:
-            documents:      原始文档列表
+            documents:      原始文档列表（按页/段）
             file_path:      源文件路径
             source_type:    来源类型
             knowledge_base: 知识库标识
 
         Returns:
-            List[Document]: 清洗后的文档列表
+            List[Document]: 清洗后的文档列表（无有效内容的页/段被丢弃）
         """
         file_name = os.path.basename(file_path)
-        cleaned = []
 
-        for doc in documents:
-            page_num = doc.metadata.get("page", 0)
-            raw_text = doc.page_content or ""
+        cleaned_texts, stats = self._cleaner.clean_pages(
+            [doc.page_content or "" for doc in documents]
+        )
 
-            # 按行过滤
-            lines = raw_text.split("\n")
-            valid_lines = []
-            in_ocr_block = False  # [OCR识别] 之后的 OCR 文本豁免短行过滤
-
-            for line in lines:
-                stripped = line.strip()
-                if stripped.startswith("[OCR识别]"):
-                    in_ocr_block = True
-                if self.config.filter_blank_lines and not stripped:
-                    continue
-                if not in_ocr_block and len(stripped) < self.config.min_line_length:
-                    continue
-                valid_lines.append(stripped)
-
-            cleaned_text = "\n".join(valid_lines)
-
-            if not cleaned_text.strip():
+        cleaned: List[Document] = []
+        for doc, cleaned_text in zip(documents, cleaned_texts):
+            if not cleaned_text:
                 continue
 
             # 绑定完整元数据（含多源融合字段）
@@ -317,7 +305,7 @@ class DocumentLoader:
             doc.metadata.update({
                 "file_name": file_name,
                 "file_path": file_path,
-                "page": page_num,
+                "page": doc.metadata.get("page", 0),
                 "doc_id": str(uuid.uuid4())[:8],
                 "source_type": source_type,        # 多源融合：论文/综述/笔记
                 "knowledge_base": knowledge_base,  # 多知识库隔离
@@ -325,6 +313,7 @@ class DocumentLoader:
             })
             cleaned.append(doc)
 
+        logger.info(f"文本清洗统计: {file_name} | {stats.summary()}")
         return cleaned
 
 

@@ -38,9 +38,15 @@ class DocProcessConfig:
     ocr_render_dpi: int = 200  # 扫描页渲染分辨率（越高越清晰，越慢）
 
     # 文本清洗：过滤空白行、页眉页脚、无效冗余
+    enable_cleaning: bool = True  # 清洗总开关（关闭则原文透传，供 A/B 对比评估）
     filter_blank_lines: bool = True
-    filter_header_footer: bool = True
-    min_line_length: int = 10  # 最短有效行长度
+    filter_header_footer: bool = True  # 跨页首尾重复行统计识别（页眉页脚）
+    min_line_length: int = 10  # 最短有效行长度（仅约束正文散行）
+    clean_unicode_normalize: bool = True  # NFKC 归一 + 零宽/控制字符清理
+    clean_fix_hyphenation: bool = True  # PDF 行尾连字符断词拼接
+    clean_strip_page_artifacts: bool = True  # 页码/装饰线/乱码水印行剔除
+    clean_header_footer_min_pages: int = 3  # 重复行判定为页眉页脚的最少跨页数
+    clean_garbage_line_ratio: float = 0.6  # 非文字字符占比超过此值判为乱码行
 
     # 嵌入模型
     embedding_model: str = "BAAI/bge-m3"
@@ -60,10 +66,10 @@ class DocProcessConfig:
 @dataclass
 class VectorStoreConfig:
     """Layer 2 - 向量存储层配置"""
-    # 向量库类型：pgvector（生产，简历对齐） / chroma（开发 fallback）
-    store_type: Literal["pgvector", "chroma"] = "pgvector"
+    # 向量库类型：chroma（默认，本地持久化） / pgvector（可选，需外部 PostgreSQL）
+    store_type: Literal["pgvector", "chroma"] = "chroma"
 
-    # PGvector 配置（生产环境，PostgreSQL + pgvector 扩展）
+    # PGvector 配置（可选，需要外部 PostgreSQL + pgvector 扩展）
     pg_host: str = "localhost"
     pg_port: int = 5432
     pg_database: str = "rag_kb"
@@ -72,7 +78,7 @@ class VectorStoreConfig:
     pg_table_name: str = "documents"  # 向量表名
     pg_vector_size: int = 1024  # bge-m3 输出维度 = 1024
 
-    # Chroma 配置（开发环境 fallback）
+    # Chroma 配置（默认向量库，本地持久化）
     chroma_persist_dir: str = "./data/chroma_db"
     chroma_collection_name: str = "rag_kb_collection"
 
@@ -207,7 +213,7 @@ def get_settings() -> Settings:
     if settings.env == "production":
         settings.debug = False
         settings.log_level = "WARNING"
-        settings.vector_store.store_type = "pgvector"
+        settings.vector_store.store_type = os.getenv("STORE_TYPE", "chroma")
 
         # 生产环境：从环境变量读取敏感配置
         settings.llm.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "")
@@ -224,8 +230,8 @@ def get_settings() -> Settings:
         # 开发环境：从环境变量读取（可选覆盖）
         settings.llm.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "")
         settings.llm.qwen_api_key = os.getenv("QWEN_API_KEY", "")
-        # 开发环境默认用 PGvector（与简历对齐），可通过 STORE_TYPE=chroma 回退
-        settings.vector_store.store_type = os.getenv("STORE_TYPE", "pgvector")
+        # 开发环境默认用 Chroma 本地向量库；可通过 STORE_TYPE=pgvector 切换
+        settings.vector_store.store_type = os.getenv("STORE_TYPE", "chroma")
         # 允许环境变量覆盖 PG 连接
         settings.vector_store.pg_host = os.getenv("PG_HOST", "localhost")
         settings.vector_store.pg_port = int(os.getenv("PG_PORT", "5432"))
@@ -235,6 +241,11 @@ def get_settings() -> Settings:
 
     # OCR 开关（两个环境共用）
     settings.doc_process.enable_ocr = os.getenv("OCR_ENABLE", "0").lower() in ("1", "true", "yes")
+
+    # Chroma 持久化目录（两个环境共用）
+    settings.vector_store.chroma_persist_dir = os.getenv(
+        "CHROMA_PERSIST_DIR", settings.vector_store.chroma_persist_dir
+    )
 
     return settings
 

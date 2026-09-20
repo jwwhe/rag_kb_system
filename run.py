@@ -2,8 +2,8 @@
 ================================================================================
   RAG 知识库问答系统 - 启动入口
   使用方式：
-    python run.py                  # 开发环境启动（Chroma + 调试日志）
-    ENV=production python run.py   # 生产环境启动（Qdrant + 精简日志）
+    python run.py                  # 默认启动（Chroma + 调试日志）
+    ENV=production python run.py   # 生产环境启动（精简日志，STORE_TYPE 可切 pgvector）
 ================================================================================
 """
 import sys

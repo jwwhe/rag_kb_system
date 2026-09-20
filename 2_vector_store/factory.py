@@ -1,7 +1,7 @@
 """
 ===============================================================================
   Layer 2 - 向量存储层: 工厂函数
-  根据配置自动切换 PGvector（生产）/ Chroma（开发），业务代码无需感知差异。
+  根据配置自动切换 Chroma（默认）/ PGvector（可选），业务代码无需感知差异。
 ===============================================================================
 """
 from typing import Optional
@@ -41,11 +41,11 @@ class VectorStoreFactory:
         store_type = settings.vector_store.store_type
 
         if store_type == "pgvector":
-            logger.info("创建 PGvector 向量存储（生产环境）")
+            logger.info("创建 PGvector 向量存储")
             return PGVectorStore()
 
         elif store_type == "chroma":
-            logger.info("创建 Chroma 向量存储（开发环境 fallback）")
+            logger.info("创建 Chroma 向量存储")
             return ChromaVectorStore()
 
         else:

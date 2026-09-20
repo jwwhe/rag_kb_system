@@ -33,15 +33,16 @@
 | 智能问答 | 完整六层链路：改写→MMR→BM25→混合→Rerank→多源融合→生成→纠错→溯源 |
 | 引用溯源 | 每条答案绑定原文片段、文件名、页码、相似度、来源类型 |
 | Web 搜索兜底 | 知识库无匹配时自动联网搜索补充，明确标注外网来源 |
-| 双库适配 | 生产 PGvector（D盘本地） / 开发 Chroma，环境变量一键切换 |
+| 双库适配 | 默认 Chroma（本地文件持久化） / 可选 PGvector，环境变量一键切换 |
 | 多 LLM 切换 | 配置即可在 DeepSeek / Qwen / Ollama 之间切换 |
 | 量化评估 | Recall@K / MRR / NDCG / 幻觉率，RAG vs 纯 LLM 对比 |
 
 ### 处理流程
 
 ```
-上传文档 → 多格式解析 → 清洗过滤 → 零宽断言分块(800字/150重叠)
-→ bge-m3 向量化(1024维) → 存入 PGvector / Chroma
+上传文档 → 多格式解析 → 结构化清洗(归一化/页码页眉页脚/乱码过滤，保留MD结构)
+→ 零宽断言分块(800字/150重叠)
+→ bge-m3 向量化(1024维) → 存入 Chroma / PGvector
 
 用户提问 → 查询改写(指代消解) → MMR多样性去重(Top8)
 → BM25关键词检索(Top8) → 混合融合(0.6/0.4)
@@ -119,8 +120,8 @@ python run.py
 DEEPSEEK_API_KEY=sk-your-key
 
 # 向量库
-STORE_TYPE=pgvector              # pgvector / chroma
-PG_HOST=localhost                # PostgreSQL 地址
+STORE_TYPE=chroma                # chroma（默认） / pgvector
+PG_HOST=localhost                # 仅 pgvector 需要
 
 # 模型（网络不通时启用离线）
 HF_HUB_OFFLINE=1                 # 设为 1 使用本地缓存模型
@@ -136,14 +137,20 @@ active_llm = "deepseek"   # deepseek / qwen / ollama
 ### 4.4 切换向量库
 
 ```bash
-STORE_TYPE=pgvector python run.py   # 生产：PGvector (D盘)
-STORE_TYPE=chroma python run.py     # 开发：Chroma (本地文件)
+STORE_TYPE=chroma python run.py     # 默认：Chroma (本地文件)
+STORE_TYPE=pgvector python run.py   # 可选：PGvector (D盘)
 ```
 
 ### 4.5 可调参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
+| `enable_cleaning` | True | 清洗总开关（关闭则原文透传，便于对比评估） |
+| `min_line_length` | 10 | 正文散行最短长度（标题/列表/表格/代码块豁免） |
+| `filter_header_footer` | True | 跨页首尾重复行识别为页眉页脚并剔除 |
+| `clean_header_footer_min_pages` | 3 | 重复行判为页眉页脚的最少跨页数 |
+| `clean_fix_hyphenation` | True | PDF 行尾连字符断词拼接 |
+| `clean_garbage_line_ratio` | 0.6 | 非文字字符占比阈值，超过判为乱码行 |
 | `chunk_size` | 800 | 分块大小 |
 | `chunk_overlap` | 150 | 块间重叠 |
 | `vector_top_k` | 8 | 向量检索召回数 |
@@ -162,7 +169,7 @@ STORE_TYPE=chroma python run.py     # 开发：Chroma (本地文件)
 ```bash
 # 终端 1：后端 API
 python run.py
-# 启动后显示：向量库: pgvector | LLM: deepseek | 监听: 0.0.0.0:8000
+# 启动后显示：向量库: chroma | LLM: deepseek | 监听: 0.0.0.0:8000
 
 # 终端 2：Streamlit 前端
 streamlit run app_streamlit.py
@@ -388,8 +395,8 @@ PDF (.pdf)、Word (.docx)、Markdown (.md, .markdown)。不支持扫描件 OCR�
 
 ### Q4: 如何切换向量库？
 ```bash
-STORE_TYPE=pgvector python run.py   # PGvector (D盘)
 STORE_TYPE=chroma python run.py     # Chroma (本地文件)
+STORE_TYPE=pgvector python run.py   # PGvector (D盘)
 ```
 
 ### Q5: 模型下载太慢 / 网络不通？
@@ -426,7 +433,7 @@ D:\PostgreSQL\16\bin\pg_ctl -D D:\PostgreSQL\data status
 
 日志直接输出到控制台（开发环境）。启动时关注以下关键信息：
 ```
-向量库: pgvector (或 chroma)
+向量库: chroma (或 pgvector)
 LLM: deepseek
 嵌入模型加载完成
 重排模型加载完成
