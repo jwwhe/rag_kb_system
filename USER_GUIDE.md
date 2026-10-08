@@ -109,9 +109,11 @@ python run.py
 
 | 方式 | 适用场景 |
 |------|----------|
-| `.env` 文件 | **推荐**，项目级固定配置 |
-| 环境变量 | 临时覆盖、敏感信息 |
+| `.env` 文件 | **推荐**，项目级固定配置（启动时自动加载） |
+| 环境变量 | 临时覆盖、敏感信息（优先级高于 `.env`） |
 | `config/settings.py` | 修改默认参数值 |
+
+> `.env` 只是被读取，不会被写入或提交；请把该文件加入 `.gitignore`。
 
 ### 4.2 必配参数（.env）
 
@@ -129,10 +131,13 @@ HF_HUB_OFFLINE=1                 # 设为 1 使用本地缓存模型
 
 ### 4.3 切换 LLM
 
-编辑 `config/settings.py` 的 `LLMConfig`：
-```python
-active_llm = "deepseek"   # deepseek / qwen / ollama
+默认使用 **通义千问**（`active_llm = "qwen"`，模型 `qwen-plus`）。换模型不用改代码：
+
+```bash
+ACTIVE_LLM=deepseek python run.py    # deepseek / qwen / ollama
 ```
+
+对应 Key 必须在 `.env` 中存在（`QWEN_API_KEY` / `DEEPSEEK_API_KEY` / `OLLAMA_HOST`），缺失时检索链路照常跑，到生成阶段会抛 `GenerationError: QWEN API Key 未配置，请设置环境变量`。
 
 ### 4.4 切换向量库
 
@@ -151,12 +156,21 @@ STORE_TYPE=pgvector python run.py   # 可选：PGvector (D盘)
 | `clean_header_footer_min_pages` | 3 | 重复行判为页眉页脚的最少跨页数 |
 | `clean_fix_hyphenation` | True | PDF 行尾连字符断词拼接 |
 | `clean_garbage_line_ratio` | 0.6 | 非文字字符占比阈值，超过判为乱码行 |
+| `source_type_labels` | 论文原文/综述解读/实验笔记 | 合法来源类型清单（融合配额与前端下拉框的唯一来源） |
+| `default_source_type` | 论文原文 | 推断不出时的兜底来源类型 |
+| `infer_source_type` | True | 是否按文件名关键词自动推断来源类型 |
 | `chunk_size` | 800 | 分块大小 |
 | `chunk_overlap` | 150 | 块间重叠 |
 | `vector_top_k` | 8 | 向量检索召回数 |
 | `mmr_fetch_k` | 30 | MMR 候选拉取数 |
 | `mmr_lambda` | 0.7 | MMR 多样性权衡 |
 | `rerank_top_k` | 3 | 送入 LLM 的最优条数 |
+| `rerank_max_candidates` | 6 | 精排候选上限（响应速度主开关，越小越快） |
+| `rerank_max_length` | 512 | 精排单条最大 token 数（调低会打乱排序，不建议） |
+| `enable_multi_source_fusion` | True | 多源配额融合开关（作用于 Rerank 后的完整候选池） |
+| `fusion_min_per_source` | 1 | 每类来源最少保留条数 |
+| `rerank_min_score` | 0.5 | 精排可信门槛：该类最高分低于它就不占配额；全局最高分低于它就改走 Web 兜底 |
+| `cpu_threads` | 0 | CPU 推理线程数，0=自动取逻辑核数 |
 | `similarity_threshold` | 0.35 | 最低相似度阈值 |
 | `temperature` | 0.1 | LLM 生成温度 |
 
@@ -194,7 +208,7 @@ streamlit run app_streamlit.py
 
 1. 左侧 "上传文档" → 点击 "Browse files"
 2. 选择文件（支持 `.pdf` / `.docx` / `.md`）
-3. 选择 **来源类型**（论文原文 / 综述解读 / 实验笔记）
+3. 逐个确认每个文件的 **来源类型**（论文原文 / 综述解读 / 实验笔记）。默认值由文件名推断（如"综述解读_xxx.md"→ 综述解读），可手动改
 4. 点击 "入库" → 等待处理完成
 
 ### 6.2 问答
@@ -230,12 +244,22 @@ streamlit run app_streamlit.py
 
 ### 7.2 文档上传入库
 
+来源类型支持两种写法，优先级：`source_type_list`（逐文件）> `source_type`（整批同值）> 文件名推断 > `default_source_type`。
+
 ```bash
+# 整批使用同一来源类型
 curl -X POST http://localhost:8000/api/v1/documents/upload \
   -F "files=@论文.pdf" \
   -F "files=@笔记.docx" \
   -F "files=@综述.md" \
   -F "source_type=论文原文" \
+  -F "knowledge_base=default"
+
+# 逐文件指定（JSON 数组，顺序与 files 一一对应，长度不一致返回 400）
+curl -X POST http://localhost:8000/api/v1/documents/upload \
+  -F "files=@论文.pdf" \
+  -F "files=@笔记.docx" \
+  -F 'source_type_list=["论文原文","实验笔记"]' \
   -F "knowledge_base=default"
 ```
 
@@ -325,12 +349,12 @@ curl -X POST http://localhost:8000/api/v1/eval/compare \
 ### 8.1 场景一：学术论文知识库
 
 ```bash
-# 上传论文原文、综述解读、实验笔记
+# 上传论文原文、综述解读、实验笔记（逐文件标注来源类型）
 curl -X POST http://localhost:8000/api/v1/documents/upload \
   -F "files=@注意力机制论文原文.md" \
   -F "files=@Transformer综述解读.md" \
   -F "files=@Transformer复现实验笔记.md" \
-  -F "source_type=论文原文" \
+  -F 'source_type_list=["论文原文","综述解读","实验笔记"]' \
   -F "knowledge_base=transformer"
 
 # 提问 + 多轮追问
@@ -374,9 +398,13 @@ python run_eval.py --store chroma
 **快速评估：**
 ```bash
 python run_eval.py                    # 完整评估（检索 + 生成 + RAG vs 纯LLM对比）
-python run_eval.py --no-generation    # 仅检索指标
+python run_eval.py --no-generation    # 仅检索指标（不需要 LLM API Key）
 python run_eval.py --store chroma     # 指定向量库
 ```
+
+**评测集怎么来的**：`data/eval_dataset.json` 由 Step 2 从**当前向量库**按关键词匹配自动生成，不是手写死 ID。
+`chunk_id = 原始文件名 + 块内容哈希`，同一份文档重新入库 ID 不变，评测集不会因重跑而失效；
+只有换了文档内容或改了分块参数才需要重新生成（再跑一次 `run_eval.py --skip-upload` 即可）。
 
 ---
 
@@ -393,6 +421,14 @@ PDF (.pdf)、Word (.docx)、Markdown (.md, .markdown)。不支持扫描件 OCR�
 - 增大 `rerank_top_k`（3 → 5）给 LLM 更多上下文
 - 提问时使用原文术语
 
+### Q3.1: 提问后等很久才出结果？
+一次问答的耗时集中在精排（CPU 上约 1.9 秒/条 × 候选数）和三次串行大模型调用。
+- 看日志里的 `问答耗时` 行，确认瓶颈阶段
+- 调小 `rerank_max_candidates`（6 → 4）换取速度，基本不影响 Top3 命中
+- 设置 `TORCH_THREADS`（默认自动取逻辑核数）
+- 服务启动日志会显示两个模型的预热耗时；未预热时首问会慢 5~8 秒
+- 想要秒级响应需换更小的精排模型或 GPU（CPU + bge-reranker-v2-m3 的吞吐上限就在这里）
+
 ### Q4: 如何切换向量库？
 ```bash
 STORE_TYPE=chroma python run.py     # Chroma (本地文件)
@@ -408,7 +444,7 @@ TRANSFORMERS_OFFLINE=1
 前提：模型已至少在线下载过一次并缓存到 `~/.cache/huggingface/`。
 
 ### Q6: 多源知识融合如何工作？
-上传文件时选择来源类型（论文原文/综述解读/实验笔记），检索时每类至少保留 1 条（min_per_source），剩余配额按分数公平竞争。
+上传时**逐个文件**标注来源类型（论文原文 / 综述解读 / 实验笔记，前端默认按文件名推断，也可用接口的 `source_type_list` 指定）。检索时融合发生在 Rerank 之后的**完整候选池**上：先给每类保留 `fusion_min_per_source` 条配额，再按分数补足到 `rerank_top_k`；只有该类最高分 ≥ `rerank_min_score` 才占用配额，避免不相关的来源被硬塞进答案；同一个门槛也用于判定"本地知识库有没有有效匹配"——最高分低于它时改走 Web 兜底。
 
 ### Q7: PostgreSQL 怎么启动？
 ```bash

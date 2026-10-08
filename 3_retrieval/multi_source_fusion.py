@@ -23,11 +23,11 @@ logger = get_logger(__name__)
 class MultiSourceFusioner:
     """
     多源知识融合器。
-    在混合检索融合 + Rerank 之后，按 source_type 配额选取最终结果。
-    """
+    在 Rerank 打分后的候选池上按 source_type 配额挑选，最后截断到 rerank_top_k。
 
-    # 三类来源的优先级顺序（论文原文最权威）
-    SOURCE_PRIORITY = ["论文原文", "综述解读", "实验笔记"]
+    输入必须是"全部已打分候选"而不是精排 Top-K：只对 K 条做配额等于重新排序，
+    无法把没进前 K 的另一类来源提上来。
+    """
 
     def __init__(self, config: Optional[RetrievalConfig] = None):
         """
@@ -37,29 +37,37 @@ class MultiSourceFusioner:
             config: 检索配置
         """
         self.config = config or get_settings_cached().retrieval
+        # 来源优先级沿用文档处理层的标注顺序（论文原文最权威）
+        self.source_priority = list(
+            get_settings_cached().doc_process.source_type_labels
+        )
         logger.info(
             f"MultiSourceFusioner 初始化 | "
-            f"来源优先级: {self.SOURCE_PRIORITY}"
+            f"来源优先级: {self.source_priority} | "
+            f"每类保底: {self.config.fusion_min_per_source} 条 | "
+            f"保底门槛(精排分): {self.config.rerank_min_score}"
         )
 
     def fuse(
         self,
         documents: List[Document],
         top_k: Optional[int] = None,
-        min_per_source: int = 1,
+        min_per_source: Optional[int] = None,
     ) -> List[Document]:
         """
         多源配额融合。
 
         策略：
-        1. 按 source_type 分组
-        2. 每类至少保留 min_per_source 条（若该类有结果）
-        3. 剩余配额按原分数排序补足
+        1. 按 source_type 分组（组内保持分数降序）
+        2. 每类保底 min_per_source 条，但该类最高分必须 ≥ rerank_min_score，
+           否则不强行塞入无关来源
+        3. 剩余配额按分数降序跨来源公平竞争
+        4. 结果按分数降序输出（保底只影响"选谁"，不影响上下文顺序）
 
         Args:
-            documents:      Rerank 后的候选文档（已按分数降序）
+            documents:      Rerank 后的候选池（需带 metadata.rerank_score，已按分数降序）
             top_k:          最终返回数量（默认 rerank_top_k）
-            min_per_source: 每类来源最少保留数
+            min_per_source: 每类来源最少保留数（默认 fusion_min_per_source）
 
         Returns:
             List[Document]: 多源融合后的文档列表
@@ -69,6 +77,13 @@ class MultiSourceFusioner:
 
         if top_k is None:
             top_k = self.config.rerank_top_k
+        if min_per_source is None:
+            min_per_source = self.config.fusion_min_per_source
+
+        if not self.config.enable_multi_source_fusion or top_k <= 0:
+            return documents[:top_k]
+
+        min_score = self.config.rerank_min_score
 
         # 按 source_type 分组（保持组内分数降序）
         by_source: dict[str, List[Document]] = defaultdict(list)
@@ -76,32 +91,50 @@ class MultiSourceFusioner:
             st = doc.metadata.get("source_type", "论文原文")
             by_source[st].append(doc)
 
+        def score_of(doc: Document) -> float:
+            value = doc.metadata.get(
+                "rerank_score",
+                doc.metadata.get("hybrid_score", doc.metadata.get("similarity", 0.0)),
+            )
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+
         result: List[Document] = []
         consumed_ids: set = set()
 
-        # Phase 1: 每类先取 min_per_source 条
-        for source in self.SOURCE_PRIORITY:
-            if source in by_source:
-                for doc in by_source[source][:min_per_source]:
-                    cid = doc.metadata.get("chunk_id", id(doc))
-                    if cid not in consumed_ids:
-                        result.append(doc)
-                        consumed_ids.add(cid)
-                    if len(result) >= top_k:
-                        break
+        def take(doc: Document) -> None:
+            cid = doc.metadata.get("chunk_id", id(doc))
+            if cid not in consumed_ids:
+                consumed_ids.add(cid)
+                result.append(doc)
+
+        # Phase 1: 每类先取 min_per_source 条（该类需有足够相关的结果）
+        # 优先级列表之外的来源排在后面，但同样享有保底
+        ordered_sources = self.source_priority + [
+            s for s in by_source if s not in self.source_priority
+        ]
+        for source in ordered_sources:
+            docs_of_source = by_source.get(source, [])
+            if not docs_of_source or score_of(docs_of_source[0]) < min_score:
+                continue
+            for doc in docs_of_source[:min_per_source]:
+                take(doc)
+                if len(result) >= top_k:
+                    break
             if len(result) >= top_k:
                 break
 
-        # Phase 2: 剩余配额按原分数降序补足（跨来源公平竞争）
+        # Phase 2: 剩余配额按分数降序补足（跨来源公平竞争）
         if len(result) < top_k:
-            remaining = [
-                doc for doc in documents
-                if doc.metadata.get("chunk_id", id(doc)) not in consumed_ids
-            ]
-            for doc in remaining:
-                result.append(doc)
+            for doc in documents:
+                take(doc)
                 if len(result) >= top_k:
                     break
+
+        # 保底只决定入选集合，上下文顺序仍按相关度
+        result.sort(key=score_of, reverse=True)
 
         # 统计来源分布
         source_dist = defaultdict(int)

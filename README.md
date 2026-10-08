@@ -43,7 +43,7 @@
 rag_kb_system/
 ├── config/                    # 统一配置中心
 │   └── settings.py            # 所有参数（含 MMR / 多源 / 评估配置）
-├── utils/                     # 通用工具（response / exceptions / logger）
+├── utils/                     # 通用工具（response / exceptions / logger / runtime / source_type 来源标注）
 ├── 1_doc_process/             # Layer 1: 文档处理层
 │   ├── loader.py              # PDF/Word/Markdown 多格式加载 + 多源标注
 │   ├── cleaner.py             # 结构化清洗（版式噪声/页眉页脚/断词，保留 MD 结构）
@@ -163,9 +163,12 @@ POST /api/v1/documents/upload
 Content-Type: multipart/form-data
 
 files: [论文.pdf, 笔记.docx, 综述.md]
-source_type: 论文原文      # 论文原文 / 综述解读 / 实验笔记
+source_type_list: ["论文原文","实验笔记","综述解读"]   # 与 files 顺序一一对应（长度不一致返回 400）
+source_type: 论文原文      # 整批同值的简写，优先级低于 source_type_list
 knowledge_base: default
 ```
+
+两者都不传时按文件名关键词推断，再兜底到 `default_source_type`；不在 `source_type_labels` 清单内的取值会被记录告警并重新推断。
 
 ### 4.2 智能问答（支持多轮）
 
@@ -222,7 +225,7 @@ DELETE /api/v1/kb/clear
 
 ## 五、配置说明
 
-所有配置集中在 [config/settings.py](config/settings.py)，支持环境变量覆盖：
+所有配置集中在 [config/settings.py](config/settings.py)，启动时自动读取项目根目录 `.env`（已存在的环境变量优先，不被覆盖），并支持环境变量覆盖：
 
 | 环境变量 | 说明 | 默认值 |
 |----------|------|--------|
@@ -233,6 +236,18 @@ DELETE /api/v1/kb/clear
 | `OLLAMA_HOST` | Ollama 服务地址 | http://localhost:11434 |
 | `HF_ENDPOINT` | HuggingFace 镜像 | https://hf-mirror.com |
 | `HF_HUB_OFFLINE` | 离线模式 (1=启用) | 0 |
+| `TORCH_THREADS` | CPU 推理线程数（0=自动取逻辑核数） | 0 |
+| `RERANK_MAX_CANDIDATES` | 精排候选上限（响应速度主开关） | 6 |
+| `RERANK_MAX_LENGTH` | 精排单条最大 token 数 | 512 |
+
+> 提示：`.env` 含 API Key，不要提交到版本库（建议加入 `.gitignore`）。
+
+### 响应速度
+
+一次问答的耗时几乎全部落在三处：CPU 上的 bge-reranker 精排（约 1.9s/条 × 候选数）、
+bge-m3 查询向量化（约 0.6s）、以及串行的大模型调用（查询改写 + 生成 + 自检）。
+可用 `RERANK_MAX_CANDIDATES` 直接调节精排开销；服务启动时会预热两个模型，
+问答处理也在线程池中执行，不会阻塞其他接口。日志中的 `问答耗时` 行给出每个阶段的实测毫秒数。
 
 ### 关键参数
 
@@ -249,7 +264,14 @@ DELETE /api/v1/kb/clear
 | 向量检索 TopK | 8 | Layer 3 |
 | 向量 / BM25 权重 | 0.6 / 0.4 | Layer 3 |
 | Rerank TopK | 3 | Layer 3 |
+| 精排候选上限 rerank_max_candidates | 6（内容去重后再截断） | Layer 3 |
+| 精排最大长度 rerank_max_length | 512 | Layer 3 |
+| 多源融合 | 候选池全量打分后按来源配额，保底门槛 rerank_min_score=0.5（同一门槛决定是否改走 Web 兜底） | Layer 3 |
+| 每类最少保留 fusion_min_per_source | 1 | Layer 3 |
+| 来源类型清单 source_type_labels | 论文原文 / 综述解读 / 实验笔记 | Layer 1 |
+| 来源类型推断 infer_source_type | True（文件名关键词 → 类型，兜底 default_source_type） | Layer 1 |
 | 重排模型 | BAAI/bge-reranker-v2-m3 | Layer 3 |
+| CPU 推理线程 cpu_threads | 0=自动（逻辑核数，上限 16） | 全局 |
 | LLM 温度 | 0.1 | Layer 4 |
 
 ---
@@ -270,10 +292,10 @@ DELETE /api/v1/kb/clear
 混合检索融合 (向量0.6 + BM25 0.4, 去重)
   │
   ▼
-BGE-Reranker 精排 (Top3)                        ← 两阶段第二阶段
+BGE-Reranker 精排 (对候选池全量打分，不截断)          ← 两阶段第二阶段
   │
   ▼
-多源知识融合 (论文原文/综述解读/实验笔记 配额)
+多源知识融合 (论文原文/综述解读/实验笔记 配额 + 分数门槛 → Top3)
   │
   ├── 有结果 ──→ LLM 生成 (RunnableWithMessageHistory 多轮)
   │                  │

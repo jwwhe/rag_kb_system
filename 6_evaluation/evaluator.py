@@ -119,7 +119,9 @@ class RAGEvaluator:
         generated_answers: List[str] = []
         keyword_hits: List[bool] = []
 
-        llm_call = self.llm_factory.get_llm_callable()
+        # LLM 客户端只在需要生成时建立：纯检索评估不应被 API Key 缺失挡在门外，
+        # 查询改写在 llm_call=None 时自动退化为规则引擎。
+        llm_call = self.llm_factory.get_llm_callable() if enable_generation else None
 
         for idx, sample in enumerate(dataset, 1):
             question = sample["question"]
@@ -150,8 +152,9 @@ class RAGEvaluator:
                 bm25_results = []
 
             merged = self._hybrid_searcher.merge(vector_results, bm25_results)
-            reranked = self.reranker.rerank(main_query, merged)
-            reranked = self.multi_source_fusioner.fuse(reranked)
+            # 与线上链路保持一致：全量打分 → 按来源配额挑选 → 截断
+            scored = self.reranker.rerank(main_query, merged, score_all=True)
+            reranked = self.multi_source_fusioner.fuse(scored)
 
             retrieved_ids = [d.metadata.get("chunk_id", f"doc_{i}")
                              for i, d in enumerate(reranked)]

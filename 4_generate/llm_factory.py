@@ -36,8 +36,11 @@ class LLMFactory:
         self.settings = settings or get_settings_cached()
         self.config = config or self.settings.llm
         self._client: Optional[OpenAI] = None
+        self._client_key: str = ""
         self._ollama_client = None
         self._current_model: str = ""
+        self._chat_model = None
+        self._chat_model_key: str = ""
 
         logger.info(
             f"LLMFactory 初始化完成 | 当前 LLM: {self.config.active_llm}"
@@ -77,6 +80,7 @@ class LLMFactory:
         """
         获取 LangChain 原生 ChatModel（用于 LCEL 链 + RunnableWithMessageHistory）。
         返回 ChatOpenAI 或 ChatOllama，与当前 active_llm 配置保持一致。
+        同一模型只构建一次并复用（内部持有 HTTP 连接池，重复构建会丢失 keep-alive）。
 
         Returns:
             BaseChatModel: LangChain 聊天模型实例
@@ -94,11 +98,14 @@ class LLMFactory:
                 api_base = self.config.qwen_api_base
                 model = self.config.qwen_model
 
+            cache_key = f"{active}|{api_base}|{model}"
+            if self._chat_model_key == cache_key and self._chat_model is not None:
+                return self._chat_model
             if not api_key:
                 raise GenerationError(
                     f"{active.upper()} API Key 未配置，请设置环境变量"
                 )
-            return ChatOpenAI(
+            chat_model = ChatOpenAI(
                 api_key=api_key,
                 base_url=api_base,
                 model=model,
@@ -109,7 +116,11 @@ class LLMFactory:
 
         elif active == "ollama":
             from langchain_ollama import ChatOllama
-            return ChatOllama(
+
+            cache_key = f"ollama|{self.config.ollama_host}|{self.config.ollama_model}"
+            if self._chat_model_key == cache_key and self._chat_model is not None:
+                return self._chat_model
+            chat_model = ChatOllama(
                 base_url=self.config.ollama_host,
                 model=self.config.ollama_model,
                 temperature=self.config.temperature,
@@ -118,6 +129,10 @@ class LLMFactory:
 
         else:
             raise GenerationError(f"不支持的 LLM 类型: {active}")
+
+        self._chat_model = chat_model
+        self._chat_model_key = cache_key
+        return chat_model
 
     def _init_client(self):
         """初始化或更新 LLM 客户端连接。"""
@@ -146,7 +161,14 @@ class LLMFactory:
                 f"{llm_type.upper()} API Key 未配置，请设置环境变量或修改配置文件"
             )
 
+        # 配置未变时复用已有客户端（新建 OpenAI 客户端会重建连接池，
+        # 每次问答都握手 TLS 会额外付出数百毫秒）
+        client_key = f"{llm_type}|{api_base}|{model}"
+        if self._client_key == client_key and self._client is not None:
+            return
+
         self._client = OpenAI(api_key=api_key, base_url=api_base)
+        self._client_key = client_key
         self._current_model = model
         self._ollama_client = None
 
@@ -157,6 +179,7 @@ class LLMFactory:
             self._ollama_client = ollama
             self._current_model = self.config.ollama_model
             self._client = None
+            self._client_key = ""
         except ImportError:
             raise GenerationError("ollama 库未安装，请执行: pip install ollama")
 

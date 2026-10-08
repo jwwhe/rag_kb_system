@@ -9,12 +9,15 @@
 """
 import os
 import uuid
+import json
+import time
 import tempfile
 import asyncio
 import threading
 import dataclasses
+from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -40,6 +43,7 @@ from api.dependencies import (
     get_web_fallback,
     get_rag_evaluator,
     get_pure_llm_comparator,
+    get_rag_chain,
     ensure_bm25_index,
     DocumentLoader,
     TextSplitter,
@@ -49,7 +53,6 @@ from api.dependencies import (
     HybridSearcher,
     MMRReranker,
     MultiSourceFusioner,
-    RAGChain,
     get_vector_store,
 )
 from utils.response import success_response, error_response
@@ -58,13 +61,16 @@ from utils.exceptions import (
     NoKnowledgeFoundError,
 )
 from utils.logger import get_logger
+from utils.source_type import resolve_source_types
 
 logger = get_logger(__name__)
 
 router = APIRouter()
 
-# 允许的文件扩展名（与 settings.api.allowed_extensions 对齐）
-ALLOWED_EXTENSIONS = (".pdf", ".docx", ".md", ".markdown")
+# 允许的文件扩展名（来自 settings.api.allowed_extensions）
+ALLOWED_EXTENSIONS = tuple(
+    f".{ext.lower().lstrip('.')}" for ext in get_settings().api.allowed_extensions
+)
 
 
 # ==================== 1. 多格式文档批量上传入库 ====================
@@ -79,7 +85,7 @@ _UPLOAD_LOCK = threading.Lock()
 def _process_upload_sync(
     contents: List[bytes],
     filenames: List[str],
-    source_type: str,
+    source_types: List[str],
     knowledge_base: str,
     enable_ocr: bool,
     _lock: threading.Lock = None,
@@ -87,12 +93,13 @@ def _process_upload_sync(
     """
     同步执行完整上传流水线（在独立线程中运行，避免阻塞事件循环）。
     返回 FileUploadResponse 的 dict 列表；异常统一转为 HTTPException。
+    source_types 与 filenames 一一对应（每个文件可标注不同来源类型）。
     """
     if _lock is not None:
         # 递归一次：持锁运行实际处理（避免整体重缩进）
         with _lock:
             return _process_upload_sync(
-                contents, filenames, source_type, knowledge_base, enable_ocr
+                contents, filenames, source_types, knowledge_base, enable_ocr
             )
     settings = get_settings()
 
@@ -110,7 +117,7 @@ def _process_upload_sync(
     vector_store = get_vector_store()
 
     results = []
-    for filename, content in zip(filenames, contents):
+    for filename, content, source_type in zip(filenames, contents, source_types):
         tmp_path = None
         try:
             logger.info(
@@ -139,12 +146,13 @@ def _process_upload_sync(
             if not documents:
                 raise DocumentProcessError(f"文档解析无有效内容: {filename}")
 
+            # 用原始文件名覆盖 loader 的临时文件名。必须在分块之前做：
+            # chunk_id 由 file_name 派生，临时名会让 ID 每次上传都不同。
+            for doc in documents:
+                doc.metadata["file_name"] = filename
+
             # 文本分块
             chunks = splitter.split_documents(documents)
-
-            # 修正元数据：用原始文件名覆盖 loader 的临时文件名
-            for chunk in chunks:
-                chunk.metadata["file_name"] = filename
 
             # 向量化
             chunks = embedder.embed_documents(chunks)
@@ -196,16 +204,23 @@ def _process_upload_sync(
 )
 async def upload_documents(
     files: List[UploadFile] = File(...),
-    source_type: str = Form("论文原文", description="来源类型: 论文原文/综述解读/实验笔记"),
+    source_type: Optional[str] = Form(
+        None,
+        description="整批共用的来源类型；留空则按文件名推断（论文原文/综述解读/实验笔记）",
+    ),
+    source_type_list: Optional[str] = Form(
+        None,
+        description='与 files 一一对应的来源类型 JSON 数组，优先级高于 source_type',
+    ),
     knowledge_base: str = Form("default", description="所属知识库标识"),
     enable_ocr: bool = Form(False, description="启用 OCR 识别 PDF 图片/扫描件（仅本次上传生效）"),
 ):
     """
     批量上传文件，完成：
     1. 多格式文本提取（PDF / Word / Markdown，可选 OCR 识别 PDF 图片/扫描件）
-    2. 零宽断言分块（chunk_size=800, overlap=150）
+    2. 文本清洗 + 零宽断言分块（chunk_size=800, overlap=150）
     3. bge-m3 向量化
-    4. 存入 PGvector 向量数据库（带 source_type 多源标注）
+    4. 存入向量库（默认 Chroma），并绑定逐文件的 source_type 多源标注
 
     说明：OCR/分块/向量化耗时较长（扫描件每页约数秒），
     处理在后台线程执行，客户端需耐心等待；期间其他接口不受影响。
@@ -228,12 +243,36 @@ async def upload_documents(
         contents.append(await file.read())
         filenames.append(file.filename)
 
+    # 逐文件解析来源类型（显式列表 > 整批同值 > 文件名推断 > 默认值）
+    per_file = None
+    if source_type_list:
+        try:
+            parsed = json.loads(source_type_list)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="source_type_list 必须是 JSON 数组字符串",
+            )
+        if not isinstance(parsed, list):
+            raise HTTPException(
+                status_code=400,
+                detail="source_type_list 必须是 JSON 数组",
+            )
+        per_file = [str(item) if item is not None else "" for item in parsed]
+
+    try:
+        source_types = resolve_source_types(
+            filenames, batch_source_type=source_type, per_file_source_types=per_file
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     # 重活移入线程池，避免阻塞事件循环（其他接口仍可用）
     results = await asyncio.to_thread(
         _process_upload_sync,
         contents,
         filenames,
-        source_type,
+        source_types,
         knowledge_base,
         enable_ocr,
         _lock=_UPLOAD_LOCK,
@@ -246,6 +285,188 @@ async def upload_documents(
 
 
 # ==================== 2. 智能问答接口 ====================
+
+@contextmanager
+def _stage(timings: Dict[str, float], name: str):
+    """记录一个问答阶段的耗时（毫秒），异常时同样记账。"""
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        timings[name] = (time.perf_counter() - t0) * 1000
+
+
+def _ask_sync(question: str, session_id: str) -> dict:
+    """
+    同步执行完整 RAG 问答链路（检索 + 生成 + 增强），返回结构化响应 dict。
+
+    全链路是 CPU/网络阻塞型（嵌入、精排、多次 LLM 调用），
+    必须由 asyncio.to_thread 在线程池中调用，否则会卡死事件循环。
+    """
+    settings = get_settings()
+    timings: Dict[str, float] = {}
+    t_total = time.perf_counter()
+
+    # 初始化各层组件（均为进程级单例）
+    embedder = get_embedder()
+    vector_store = get_vector_store()
+    bm25 = get_bm25_searcher()
+    reranker = get_reranker()
+    mmr_reranker = get_mmr_reranker()
+    llm_factory = get_llm_factory()
+    corrective_rag = get_corrective_rag()
+    citation_tracer = get_citation_tracer()
+    web_fallback = get_web_fallback()
+
+    llm_call = llm_factory.get_llm_callable()
+
+    # ====== Layer 3: 检索（两阶段：MMR 去重 → Reranker 精排）======
+
+    # Step 1: 查询改写
+    with _stage(timings, "查询改写"):
+        rewriter = QueryRewriter()
+        rewritten_queries = rewriter.rewrite(question, llm_call)
+
+    # 使用改写后的主查询进行检索
+    main_query = rewritten_queries[1] if len(rewritten_queries) > 1 else rewritten_queries[0]
+
+    # Step 2: 向量语义检索（启用 MMR 时走两阶段，否则回退到普通检索）
+    with _stage(timings, "向量化"):
+        query_embedding = embedder.embed_query(main_query)
+    with _stage(timings, "向量检索"):
+        if settings.retrieval.enable_mmr:
+            # 两阶段检索第一阶段：MMR 多样性去重
+            vector_results = mmr_reranker.mmr_search(
+                query_embedding=query_embedding,
+                vector_store=vector_store,
+                top_k=settings.retrieval.vector_top_k,
+                fetch_k=settings.retrieval.mmr_fetch_k,
+                lambda_mult=settings.retrieval.mmr_lambda,
+            )
+        else:
+            vector_searcher = VectorSearcher()
+            vector_results = vector_searcher.search(query_embedding, vector_store)
+
+    # Step 3: BM25 关键词检索
+    # 对每个改写查询执行 BM25，合并结果
+    with _stage(timings, "BM25检索"):
+        all_bm25_results = []
+        for q in rewritten_queries[:2]:  # 最多用 2 个查询变体
+            try:
+                bm25_results = bm25.search(q)
+                all_bm25_results.extend(bm25_results)
+            except Exception as e:
+                logger.warning(f"BM25 检索跳过 '{q[:30]}...': {e}")
+
+        # BM25 去重
+        seen_ids = set()
+        unique_bm25 = []
+        for doc in all_bm25_results:
+            cid = doc.metadata.get("chunk_id", "")
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                unique_bm25.append(doc)
+
+    # Step 4: 混合检索融合
+    with _stage(timings, "混合融合"):
+        hybrid_searcher = HybridSearcher()
+        merged_results = hybrid_searcher.merge(vector_results, unique_bm25)
+
+    # Step 5: Rerank 重排（保留全部已打分候选，供多源融合挑选）
+    with _stage(timings, "精排"):
+        scored_results = reranker.rerank(main_query, merged_results, score_all=True)
+
+    # Step 6: 多源知识融合（在候选池上按来源配额挑选，再截断到 rerank_top_k）
+    with _stage(timings, "多源融合"):
+        multi_source_fusioner = get_multi_source_fusioner()
+        reranked_results = multi_source_fusioner.fuse(scored_results)
+
+    is_from_web = False
+    final_answer = ""
+
+    # 判断是否需要触发 Web 兜底：
+    # 条件1：重排后无结果
+    # 条件2：精排最高分低于可信门槛（知识库无有效匹配）
+    top_score = (
+        reranked_results[0].metadata.get("rerank_score", 0)
+        if reranked_results else 0
+    )
+    kb_has_valid_result = (
+        len(reranked_results) > 0
+        and top_score >= settings.retrieval.rerank_min_score
+    )
+
+    # ====== Layer 4 + Layer 5: 生成 + 增强 ======
+
+    if kb_has_valid_result:
+        # ====== 本地知识库回答 ======
+        rag_chain = get_rag_chain()
+
+        # 生成答案（传入 session_id 启用多轮对话）
+        with _stage(timings, "生成"):
+            answer = rag_chain.generate(
+                question, reranked_results, llm_call, session_id=session_id
+            )
+
+        # 纠正型 RAG 自检
+        with _stage(timings, "自检纠错"):
+            corrected_answer = corrective_rag.correct(
+                answer, reranked_results, llm_call
+            )
+
+        final_answer = corrected_answer
+
+        # 溯源
+        with _stage(timings, "溯源"):
+            citations = citation_tracer.build_citations(
+                reranked_results, source_type="internal"
+            )
+            full_response = citation_tracer.build_full_response(
+                final_answer, citations, is_from_web=False
+            )
+
+    else:
+        # ====== Web 搜索兜底 ======
+        reason = (
+            "无检索结果" if not reranked_results else
+            f"精排最高分 {top_score:.3f} 低于可信门槛 "
+            f"{settings.retrieval.rerank_min_score}"
+        )
+        logger.info(f"触发 Web 搜索兜底: {reason}")
+
+        with _stage(timings, "网络兜底"):
+            web_results = web_fallback.search(question)
+
+        if web_results:
+            # Web 生成回答
+            with _stage(timings, "生成"):
+                final_answer = web_fallback.build_web_answer(
+                    question, web_results, llm_call
+                )
+            is_from_web = True
+
+            # Web 结果溯源
+            web_docs = web_fallback.web_results_to_documents(web_results)
+            citations = citation_tracer.build_citations(
+                web_docs, source_type="external"
+            )
+        else:
+            # 完全无结果
+            final_answer = "知识库中暂无该相关资料，无法解答此问题"
+            citations = []
+
+        full_response = citation_tracer.build_full_response(
+            final_answer, citations, is_from_web=is_from_web
+        )
+
+    timings["总耗时"] = (time.perf_counter() - t_total) * 1000
+    logger.info(
+        "问答耗时 | "
+        + " | ".join(f"{k}: {v / 1000:.2f}s" for k, v in timings.items())
+    )
+
+    return full_response
+
 
 @router.post(
     "/qa/ask",
@@ -264,147 +485,15 @@ async def ask_question(request: QuestionRequest):
     6. 纠正型 RAG 自检
     7. 全文溯源
     8. Web 搜索兜底（知识库无结果时）
+
+    说明：检索（嵌入/精排）与 LLM 调用均为阻塞型，处理在线程池执行，
+    期间其他接口不受影响。
     """
-    settings = get_settings()
     question = request.question.strip()
     # 多轮对话 session_id（RunnableWithMessageHistory 使用）
     session_id = getattr(request, "session_id", None) or str(uuid.uuid4())
 
-    # 初始化各层组件
-    embedder = get_embedder()
-    vector_store = get_vector_store()
-    bm25 = get_bm25_searcher()
-    reranker = get_reranker()
-    mmr_reranker = get_mmr_reranker()
-    llm_factory = get_llm_factory()
-    corrective_rag = get_corrective_rag()
-    citation_tracer = get_citation_tracer()
-    web_fallback = get_web_fallback()
-
-    llm_call = llm_factory.get_llm_callable()
-
-    # ====== Layer 3: 检索（两阶段：MMR 去重 → Reranker 精排）======
-
-    # Step 1: 查询改写
-    rewriter = QueryRewriter()
-    rewritten_queries = rewriter.rewrite(question, llm_call)
-
-    # 使用改写后的主查询进行检索
-    main_query = rewritten_queries[1] if len(rewritten_queries) > 1 else rewritten_queries[0]
-
-    # Step 2: 向量语义检索（启用 MMR 时走两阶段，否则回退到普通检索）
-    query_embedding = embedder.embed_query(main_query)
-    if settings.retrieval.enable_mmr:
-        # 两阶段检索第一阶段：MMR 多样性去重
-        vector_results = mmr_reranker.mmr_search(
-            query_embedding=query_embedding,
-            vector_store=vector_store,
-            top_k=settings.retrieval.vector_top_k,
-            fetch_k=settings.retrieval.mmr_fetch_k,
-            lambda_mult=settings.retrieval.mmr_lambda,
-        )
-    else:
-        vector_searcher = VectorSearcher()
-        vector_results = vector_searcher.search(query_embedding, vector_store)
-
-    # Step 3: BM25 关键词检索
-    # 对每个改写查询执行 BM25，合并结果
-    all_bm25_results = []
-    for q in rewritten_queries[:2]:  # 最多用 2 个查询变体
-        try:
-            bm25_results = bm25.search(q)
-            all_bm25_results.extend(bm25_results)
-        except Exception as e:
-            logger.warning(f"BM25 检索跳过 '{q[:30]}...': {e}")
-
-    # BM25 去重
-    seen_ids = set()
-    unique_bm25 = []
-    for doc in all_bm25_results:
-        cid = doc.metadata.get("chunk_id", "")
-        if cid not in seen_ids:
-            seen_ids.add(cid)
-            unique_bm25.append(doc)
-
-    # Step 4: 混合检索融合
-    hybrid_searcher = HybridSearcher()
-    merged_results = hybrid_searcher.merge(vector_results, unique_bm25)
-
-    # Step 5: Rerank 重排
-    reranked_results = reranker.rerank(main_query, merged_results)
-
-    # Step 6: 多源知识融合（论文原文/综述解读/实验笔记 按配额融合）
-    multi_source_fusioner = get_multi_source_fusioner()
-    reranked_results = multi_source_fusioner.fuse(reranked_results)
-
-    is_from_web = False
-    final_answer = ""
-
-    # 判断是否需要触发 Web 兜底：
-    # 条件1：重排后无结果
-    # 条件2：重排后最高分低于阈值（知识库无有效匹配）
-    top_score = (
-        reranked_results[0].metadata.get("rerank_score", 0)
-        if reranked_results else 0
-    )
-    kb_has_valid_result = (
-        len(reranked_results) > 0
-        and top_score >= settings.retrieval.similarity_threshold
-    )
-
-    # ====== Layer 4 + Layer 5: 生成 + 增强 ======
-
-    if kb_has_valid_result:
-        # ====== 本地知识库回答 ======
-        rag_chain = RAGChain(llm_factory)
-
-        # 生成答案（传入 session_id 启用多轮对话）
-        answer = rag_chain.generate(
-            question, reranked_results, llm_call, session_id=session_id
-        )
-
-        # 纠正型 RAG 自检
-        corrected_answer = corrective_rag.correct(
-            answer, reranked_results, llm_call
-        )
-
-        final_answer = corrected_answer
-
-        # 溯源
-        citations = citation_tracer.build_citations(
-            reranked_results, source_type="internal"
-        )
-        full_response = citation_tracer.build_full_response(
-            final_answer, citations, is_from_web=False
-        )
-
-    else:
-        # ====== Web 搜索兜底 ======
-        reason = "无检索结果" if not reranked_results else f"最高相似度 {top_score:.3f} 低于阈值 {settings.retrieval.similarity_threshold}"
-        logger.info(f"触发 Web 搜索兜底: {reason}")
-
-        web_results = web_fallback.search(question)
-
-        if web_results:
-            # Web 生成回答
-            final_answer = web_fallback.build_web_answer(
-                question, web_results, llm_call
-            )
-            is_from_web = True
-
-            # Web 结果溯源
-            web_docs = web_fallback.web_results_to_documents(web_results)
-            citations = citation_tracer.build_citations(
-                web_docs, source_type="external"
-            )
-        else:
-            # 完全无结果
-            final_answer = "知识库中暂无该相关资料，无法解答此问题"
-            citations = []
-
-        full_response = citation_tracer.build_full_response(
-            final_answer, citations, is_from_web=is_from_web
-        )
+    full_response = await asyncio.to_thread(_ask_sync, question, session_id)
 
     # 构建结构化响应
     return success_response(

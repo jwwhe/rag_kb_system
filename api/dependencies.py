@@ -64,6 +64,7 @@ _llm_factory: Optional[LLMFactory] = None
 _corrective_rag: Optional[CorrectiveRAG] = None
 _citation_tracer: Optional[CitationTracer] = None
 _web_fallback: Optional[WebFallback] = None
+_rag_chain: Optional["RAGChain"] = None
 _rag_evaluator: Optional["RAGEvaluator"] = None
 _pure_llm_comparator: Optional["PureLLMComparator"] = None
 
@@ -138,6 +139,17 @@ def get_web_fallback() -> WebFallback:
     if _web_fallback is None:
         _web_fallback = WebFallback()
     return _web_fallback
+
+
+def get_rag_chain() -> "RAGChain":
+    """
+    获取 RAG 生成链单例。
+    复用同一实例可避免每次问答重建 ChatOpenAI / LLM 客户端。
+    """
+    global _rag_chain
+    if _rag_chain is None:
+        _rag_chain = RAGChain(get_llm_factory())
+    return _rag_chain
 
 
 def get_rag_evaluator() -> "RAGEvaluator":

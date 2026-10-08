@@ -92,7 +92,8 @@ async def startup_event():
         import importlib
         deps = importlib.import_module("api.dependencies")
         logger.info("正在预加载嵌入模型 bge-m3（首次需下载，约 2GB）...")
-        deps.get_embedder()
+        embedder = deps.get_embedder()
+        embedder.warmup()  # 跑一次前向，抹平首问的算子缓存分配开销
         logger.info("嵌入模型加载完成")
     except Exception as e:
         logger.warning(f"嵌入模型预热失败（将在首次请求时自动加载）: {e}")
@@ -101,7 +102,7 @@ async def startup_event():
     try:
         logger.info("正在预加载重排模型 bge-reranker（首次需下载，约 1GB）...")
         deps = importlib.import_module("api.dependencies")
-        deps.get_reranker()
+        deps.get_reranker().warmup()  # 构造是惰性的，必须显式加载权重
         logger.info("重排模型加载完成")
     except Exception as e:
         logger.warning(f"重排模型预热失败（将在首次请求时自动加载）: {e}")

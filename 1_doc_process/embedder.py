@@ -17,6 +17,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from config.settings import DocProcessConfig, get_settings_cached
 from utils.exceptions import DocumentProcessError
 from utils.logger import get_logger
+from utils.runtime import apply_cpu_threads
 
 logger = get_logger(__name__)
 
@@ -40,6 +41,9 @@ class Embedder:
         self.config = config or get_settings_cached().doc_process
 
         try:
+            # CPU 推理线程数调优（须在模型加载前生效）
+            apply_cpu_threads()
+
             # 设置 HuggingFace 镜像（国内网络环境加速下载）
             if self.config.hf_endpoint:
                 os.environ["HF_ENDPOINT"] = self.config.hf_endpoint
@@ -136,6 +140,13 @@ class Embedder:
             List[float]: 嵌入向量
         """
         return self._model.embed_query(query)
+
+    def warmup(self) -> None:
+        """
+        预热一次编码：PyTorch 首次前向要额外分配算子缓存，
+        冷启动首问会多出约 1 秒。启动时调用可抹平这段开销。
+        """
+        self._model.embed_query("预热")
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
         """

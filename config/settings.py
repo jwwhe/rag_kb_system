@@ -9,6 +9,15 @@ import os
 from typing import Literal, Optional
 from dataclasses import dataclass, field
 
+# 加载 .env（若安装了 python-dotenv）。
+# override=False：已有环境变量优先级更高，保证 docker-compose 注入的 ENV 不被本地 .env 覆盖。
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"))
+except ImportError:
+    pass
+
 
 @dataclass
 class DocProcessConfig:
@@ -27,6 +36,14 @@ class DocProcessConfig:
 
     # PDF 加载
     pdf_loader: str = "PyPDFLoader"  # 指定 PDF 加载器
+
+    # 多源知识的三类来源（上传时按文件标注，检索配额与溯源都以此为准）
+    source_type_labels: list = field(
+        default_factory=lambda: ["论文原文", "综述解读", "实验笔记"]
+    )
+    default_source_type: str = "论文原文"
+    # 未显式指定来源类型时，按文件名关键词推断（命中不到再用 default_source_type）
+    infer_source_type: bool = True
 
     # OCR 识别（PDF 含图片 / 扫描件时启用）
     # 引擎：RapidOCR（PaddleOCR 的 ONNX 版，中英文开箱即用，pip 安装 rapidocr-onnxruntime）
@@ -110,18 +127,33 @@ class RetrievalConfig:
     vector_weight: float = 0.6  # 向量检索权重
     bm25_weight: float = 0.4   # BM25 检索权重
 
+    # 多源知识融合（论文原文 / 综述解读 / 实验笔记）
+    # 在精排打分后的全部候选上做"每类保底"，再截断到 rerank_top_k
+    enable_multi_source_fusion: bool = True
+    fusion_min_per_source: int = 1  # 每类来源在最终上下文中至少保留的条数
+
     # Rerank 重排
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_top_k: int = 3  # 重排后保留最优 Top3
     rerank_device: str = "cpu"
     rerank_hf_endpoint: str = "https://hf-mirror.com"  # Rerank 模型镜像（国内）
+    # 精排候选上限：CrossEncoder 在 CPU 上约 2s/条，候选数直接决定检索耗时。
+    # 融合分数（hybrid_score）已排序，截断只丢弃尾部低分候选。
+    rerank_max_candidates: int = 6
+    # 单条 (query, doc) 的最大 token 长度。
+    # 实测降到 256 会打乱 Top3 顺序并压低绝对分数（影响兜底判定），故保持 512。
+    rerank_max_length: int = 512
+    # 精排可信门槛（sigmoid 尺度，与 similarity_threshold 的 cosine 尺度不同量纲）：
+    # 高于此分才认为知识库有有效匹配。同时决定两处：
+    # 多源融合是否给某类来源保底、检索结果是否改走 Web 兜底。
+    rerank_min_score: float = 0.5
 
 
 @dataclass
 class LLMConfig:
     """Layer 4 - 生成层 LLM 配置"""
-    # 当前使用的 LLM：deepseek / qwen / ollama
-    active_llm: Literal["deepseek", "qwen", "ollama"] = "deepseek"
+    # 当前使用的 LLM：deepseek / qwen / ollama（可用 ACTIVE_LLM 环境变量覆盖）
+    active_llm: Literal["deepseek", "qwen", "ollama"] = "qwen"
 
     # DeepSeek 配置
     deepseek_api_key: str = ""
@@ -192,6 +224,10 @@ class Settings:
     debug: bool = True
     log_level: str = "INFO"
 
+    # CPU 推理线程数（嵌入模型 + 精排模型共用）
+    # 0 = 自动（取逻辑核数，上限 16）；PyTorch 默认只按物理核，CPU 精排会慢 20~30%
+    cpu_threads: int = 0
+
 
 # ========== 配置工厂函数 ==========
 
@@ -238,6 +274,24 @@ def get_settings() -> Settings:
         settings.vector_store.pg_database = os.getenv("PG_DATABASE", "rag_kb")
         settings.vector_store.pg_user = os.getenv("PG_USER", "rag")
         settings.vector_store.pg_password = os.getenv("PG_PASSWORD", "rag123")
+
+    # CPU 推理线程数（两个环境共用，0=自动）
+    settings.cpu_threads = int(os.getenv("TORCH_THREADS", "0"))
+
+    # 精排性能参数（两个环境共用）
+    settings.retrieval.rerank_max_candidates = int(
+        os.getenv("RERANK_MAX_CANDIDATES", settings.retrieval.rerank_max_candidates)
+    )
+    settings.retrieval.rerank_max_length = int(
+        os.getenv("RERANK_MAX_LENGTH", settings.retrieval.rerank_max_length)
+    )
+    # 精排可信门槛（低于此分改走 Web 兜底 / 不给来源保底）
+    settings.retrieval.rerank_min_score = float(
+        os.getenv("RERANK_MIN_SCORE", settings.retrieval.rerank_min_score)
+    )
+
+    # 当前使用的大模型（deepseek / qwen / ollama），换模型不必改代码
+    settings.llm.active_llm = os.getenv("ACTIVE_LLM", settings.llm.active_llm)
 
     # OCR 开关（两个环境共用）
     settings.doc_process.enable_ocr = os.getenv("OCR_ENABLE", "0").lower() in ("1", "true", "yes")

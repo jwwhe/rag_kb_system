@@ -1,0 +1,48 @@
+# ============================================================================
+#  RAG 知识库问答系统 - Streamlit 外观配置
+#  说明：
+#    - client.toolbarMode="minimal" 隐藏右上角 Deploy/菜单/运行状态（去 AI 工具栏感）
+#    - 主题为浅色靛蓝配色，适配知识库问答场景；字体用内置字体，无外部网络依赖
+# ============================================================================
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+# 主色：深靛蓝（与白字对比度达标，用于按钮/链接/高亮）
+primaryColor = "#4F46E5"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F6F6FB"
+textColor = "#1F2430"
+linkColor = "#4F46E5"
+borderColor = "#E5E5F0"
+codeBackgroundColor = "#F0F0F7"
+codeTextColor = "#D946EF"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "10px"
+buttonRadius = "full"
+
+# 语义色（徽章/状态）
+greenColor = "#16A34A"
+orangeColor = "#EA580C"
+redColor = "#DC2626"
+blueColor = "#2563EB"
+violetColor = "#7C3AED"
+grayColor = "#64748B"
+
+# 图表分类色（与主色协调）
+chartCategoricalColors = ["#4F46E5", "#0891B2", "#16A34A", "#EA580C", "#DC2626", "#7C3AED", "#64748B"]
+
+# 标题层级：h1 收敛一点，整体更接近产品而非 demo
+headingFontSizes = ["28px", "22px", "18px", "16px", "14px", "13px"]
+headingFontWeights = [700, 650, 600, 600, 600, 500]
+
+[theme.sidebar]
+backgroundColor = "#F4F4FA"
+secondaryBackgroundColor = "#EBEBF5"
+borderColor = "#DEDEEC"

@@ -3,7 +3,7 @@
   RAG 知识库问答系统 - Streamlit 前端入口
   功能：
     - 多格式文档上传管理（PDF / Word / Markdown）
-    - 多源类型选择（论文原文 / 综述解读 / 实验笔记）
+    - 逐文件来源类型标注（论文原文 / 综述解读 / 实验笔记，默认按文件名推断）
     - 知识库统计与文件管理
     - 多轮对话（带历史消息 + 引用溯源展示）
     - 引用来源卡片展示（文件名、页码、相似度、来源类型）
@@ -15,6 +15,7 @@
 """
 import os
 import sys
+import json
 import uuid
 import requests
 import streamlit as st
@@ -25,14 +26,15 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from config.settings import get_settings_cached
+from utils.source_type import allowed_source_types, suggest_source_type
 
 # ==================== 全局配置 ====================
 _SETTINGS = get_settings_cached()
 _API_BASE = os.getenv("RAG_API_BASE", f"http://localhost:{_SETTINGS.api.port}/api/v1")
 
-# 支持的文件类型
-SUPPORTED_TYPES = ["pdf", "docx", "md", "markdown"]
-SOURCE_TYPES = ["论文原文", "综述解读", "实验笔记"]
+# 支持的文件类型 / 来源类型（与后端 settings 保持一致，不在此处另立名单）
+SUPPORTED_TYPES = list(_SETTINGS.api.allowed_extensions)
+SOURCE_TYPES = allowed_source_types()
 SUGGESTIONS = [
     "这篇论文的核心方法是什么？",
     "综述解读和论文原文的结论一致吗？",
@@ -69,12 +71,12 @@ init_session_state()
 
 
 # ==================== API 调用封装 ====================
-def call_upload(files, source_type: str, knowledge_base: str, enable_ocr: bool = False):
-    """调用后端文档上传接口。"""
+def call_upload(files, source_types, knowledge_base: str, enable_ocr: bool = False):
+    """调用后端文档上传接口（source_types 与 files 一一对应）。"""
     url = f"{st.session_state.api_base}/documents/upload"
     multipart = [("files", (f.name, f.read(), "application/octet-stream")) for f in files]
     data = {
-        "source_type": source_type,
+        "source_type_list": json.dumps(list(source_types), ensure_ascii=False),
         "knowledge_base": knowledge_base,
         "enable_ocr": enable_ocr,
     }
@@ -168,7 +170,9 @@ def render_citations(citations, source_type="internal"):
                 st.markdown(f"**{cit['citation_id']}** · {cit['file_name']}")
                 page = cit.get("page", "-")
                 similarity = cit.get("similarity", 0)
-                kind = "外部" if cit.get("source_type") == "external" else "本地"
+                kind = "外部" if cit.get("source_type") == "external" else cit.get(
+                    "doc_source", "本地"
+                )
                 st.caption(f"第 {page} 页 · 相似度 {similarity:.4f} · {kind}")
                 snippet = cit.get("original_text", "")[:300]
                 if len(cit.get("original_text", "")) > 300:
@@ -248,22 +252,32 @@ with st.sidebar:
     st.space("small")
     st.markdown("**上传文档**")
 
+    # 文件选择器放在表单外：选中文件后才能逐个渲染"来源类型"下拉框
+    uploaded_files = st.file_uploader(
+        "选择文件",
+        type=SUPPORTED_TYPES,
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state.uploader_key}",
+        help="支持 PDF、Word、Markdown",
+        label_visibility="collapsed",
+    )
+
+    source_keys = []
+    if uploaded_files:
+        st.caption("逐个确认来源类型（默认按文件名推断）")
+        for idx, file in enumerate(uploaded_files):
+            suggested = suggest_source_type(file.name)
+            key = f"source_type_{st.session_state.uploader_key}_{idx}"
+            st.selectbox(
+                file.name,
+                SOURCE_TYPES,
+                index=SOURCE_TYPES.index(suggested) if suggested in SOURCE_TYPES else 0,
+                key=key,
+                help="用于多源知识融合与引用溯源",
+            )
+            source_keys.append(key)
+
     with st.form("upload_form", border=False):
-        uploaded_files = st.file_uploader(
-            "选择文件",
-            type=SUPPORTED_TYPES,
-            accept_multiple_files=True,
-            key=f"uploader_{st.session_state.uploader_key}",
-            help="支持 PDF、Word、Markdown",
-            label_visibility="collapsed",
-        )
-        source_type = st.segmented_control(
-            "来源类型",
-            SOURCE_TYPES,
-            default=SOURCE_TYPES[0],
-            key="source_type",
-            help="用于多源知识融合",
-        )
         knowledge_base = st.text_input(
             "知识库标识",
             value="default",
@@ -285,8 +299,9 @@ with st.sidebar:
         if not uploaded_files:
             st.warning("请先选择文件", icon=":material/upload_file:")
         else:
+            source_types = [st.session_state[key] for key in source_keys]
             with st.spinner("正在处理文档（OCR/向量化较慢，请耐心等待）"):
-                result = call_upload(uploaded_files, source_type, knowledge_base, enable_ocr)
+                result = call_upload(uploaded_files, source_types, knowledge_base, enable_ocr)
             if result and result.get("code") == 200:
                 st.success(result.get("message", "上传成功"), icon=":material/check_circle:")
                 with st.container(border=True):

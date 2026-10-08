@@ -125,55 +125,60 @@ def upload_samples(samples_dir: str):
 
 # ==================== 2. 动态构建评测集 ====================
 # 评测问题模板：question + 匹配关键词（用于找 relevant_doc_ids）+ 预期答案关键词
+#
+# match_keywords 的口径：必须是"答案句里独有的决定性片段"（verbatim，取自样例文档原文），
+# 不能用泛词。样例库只有 7 块，"多头"/"BLEU"/"维度"/"位置编码"这类词遍布几乎所有块，
+# 会让 relevant 集合膨胀到 6/7，Recall@K 与 MRR 全部失真（随便召回都算对）。
+# 命中方式是 any()，所以每个词都要单独具备区分度。
 EVAL_TEMPLATE = [
     {
         "question": "Transformer 模型使用了多少层编码器和解码器？",
-        "match_keywords": ["6 层", "6层", "编码器", "解码器"],
+        "match_keywords": ["编码器由 6 层", "6 层编码器 + 6 层解码器"],
         "expected_keywords": ["6", "编码器", "解码器"],
     },
     {
         "question": "缩放点积注意力公式中为什么要除以 sqrt(d_k)？",
-        "match_keywords": ["sqrt", "饱和", "梯度消失", "方差"],
+        "match_keywords": ["除以 sqrt(d_k) 是为了缓解", "做方差归一化", "缩放因子漏了 sqrt"],
         "expected_keywords": ["梯度", "饱和", "softmax"],
     },
     {
         "question": "Transformer 在 WMT 2014 英德翻译上取得了多少 BLEU 分数？",
-        "match_keywords": ["28.4", "BLEU", "英德"],
+        "match_keywords": ["28.4"],
         "expected_keywords": ["28.4", "BLEU"],
     },
     {
         "question": "多头注意力机制使用了多少个头？",
-        "match_keywords": ["h=8", "8 个头", "多头"],
+        "match_keywords": ["h=8 个头", "多头数 h = 8", "8 个头是性能"],
         "expected_keywords": ["8", "多头"],
     },
     {
         "question": "复现实验中学习率 warmup_steps 设置为多少？",
-        "match_keywords": ["warmup_steps=4000", "4000", "warmup"],
+        "match_keywords": ["warmup_steps=4000"],
         "expected_keywords": ["4000", "warmup"],
     },
     {
         "question": "位置编码使用什么函数生成？",
-        "match_keywords": ["正弦", "余弦", "sin", "cos", "位置编码"],
+        "match_keywords": ["正弦和余弦函数生成位置编码", "正弦/余弦函数", "sin/cos 交替"],
         "expected_keywords": ["正弦", "余弦", "sin", "cos"],
     },
     {
         "question": "复现实验中漏掉 sqrt(d_k) 会导致什么问题？",
-        "match_keywords": ["收敛", "BLEU", "sqrt"],
+        "match_keywords": ["BLEU 下降 3 个点", "收敛很慢"],
         "expected_keywords": ["收敛", "BLEU"],
     },
     {
         "question": "Transformer 的训练成本相比之前模型降低了多少？",
-        "match_keywords": ["1/4", "训练成本", "P100"],
+        "match_keywords": ["训练成本仅为当时最佳模型的 1/4", "1/4"],
         "expected_keywords": ["1/4", "四分之一", "成本"],
     },
     {
         "question": "位置编码的维度必须与什么一致？",
-        "match_keywords": ["d_model", "维度", "512"],
+        "match_keywords": ["必须与 d_model 一致"],
         "expected_keywords": ["d_model", "512"],
     },
     {
         "question": "RNN 的核心问题是什么？",
-        "match_keywords": ["并行", "梯度消失", "序列依赖", "RNN"],
+        "match_keywords": ["RNN 的核心问题是无法并行", "序列依赖特性限制了并行"],
         "expected_keywords": ["并行", "梯度", "依赖"],
     },
 ]

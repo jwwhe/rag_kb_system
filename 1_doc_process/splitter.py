@@ -20,7 +20,7 @@
 ================================================================================
 """
 import re
-import uuid
+import hashlib
 from datetime import datetime
 from typing import List, Optional
 
@@ -81,6 +81,14 @@ class TextSplitter:
             f"zero_width={self.config.use_zero_width_separator}"
         )
 
+    @staticmethod
+    def _make_chunk_id(file_name: str, chunk_text: str) -> str:
+        """由 (文件名, 块内容) 派生可复现的 chunk_id。"""
+        digest = hashlib.sha1(
+            f"{file_name}\x00{chunk_text}".encode("utf-8")
+        ).hexdigest()[:8]
+        return f"{file_name}_{digest}"
+
     def split_documents(self, documents: List[Document]) -> List[Document]:
         """
         分割文档列表为句子边界对齐的 chunk。
@@ -89,7 +97,7 @@ class TextSplitter:
         - doc_id:        文档唯一标识
         - file_name:     源文件名
         - page:          源页码
-        - chunk_id:      分块唯一标识
+        - chunk_id:      分块唯一标识（内容哈希，重新入库不变）
         - upload_time:   上传时间
         - source_type:   来源类型（继承自上游 loader）
         - knowledge_base: 知识库标识（继承自上游 loader）
@@ -142,7 +150,12 @@ class TextSplitter:
                     continue
                 chunk_meta = dict(base_meta)
                 chunk_meta.update({
-                    "chunk_id": f"{base_meta.get('file_name', 'doc')}_{uuid.uuid4().hex[:8]}",
+                    # chunk_id 必须可复现：用 (文件名, 块内容) 的哈希而不是随机 UUID，
+                    # 否则每次重新入库都会换 ID，评估集的 relevant_doc_ids 立刻失效，
+                    # 重复上传同一份文档也会产生两份向量块。
+                    "chunk_id": self._make_chunk_id(
+                        base_meta.get("file_name", "doc"), chunk_text
+                    ),
                     "chunk_index": len(all_chunks),
                     "upload_time": upload_time,
                     "chunk_size": len(chunk_text),
